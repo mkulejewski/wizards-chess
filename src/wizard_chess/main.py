@@ -4,11 +4,15 @@ import argparse
 import sys
 from collections.abc import Callable, Sequence
 
-from wizard_chess.application.session import GameSession
+from wizard_chess.application.session import GameSession, SessionResult
 from wizard_chess.domain.exceptions import WizardChessError
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.results import GameStatus
 from wizard_chess.hardware.base import PhysicalBoard
+from wizard_chess.speech.controller import VoiceController
+from wizard_chess.speech.exceptions import VoiceCommandRejected, VoiceError
+from wizard_chess.speech.factory import create_default_voice_controller
+from wizard_chess.speech.models import VoiceState
 
 InputFunction = Callable[[str], str]
 OutputFunction = Callable[[str], None]
@@ -23,10 +27,15 @@ class CliApplication:
         input_fn: InputFunction = input,
         output_fn: OutputFunction = print,
         physical_board: PhysicalBoard | None = None,
+        session: GameSession | None = None,
+        voice_controller: VoiceController[SessionResult] | None = None,
     ) -> None:
         self._input = input_fn
         self._output = output_fn
-        self._session = GameSession(physical_board)
+        self._session = session or GameSession(physical_board)
+        self._voice_controller = voice_controller or create_default_voice_controller(
+            self._session.play_text
+        )
 
     @property
     def game(self) -> ChessGame:
@@ -44,15 +53,43 @@ class CliApplication:
                 return 0
 
             try:
-                result = self._session.play_text(text)
-                if result.message is not None:
-                    self._output(result.message)
-                if result.quit_requested:
+                if text.strip().lower() == "voice":
+                    if self._run_voice_command():
+                        return 0
+                    continue
+
+                if self._handle_session_result(self._session.play_text(text)):
                     return 0
-                if result.move_event is not None:
-                    self._announce_state()
             except WizardChessError as error:
                 self._output(f"Error: {error}")
+
+    def _run_voice_command(self) -> bool:
+        try:
+            result = self._voice_controller.listen_once(self._announce_voice_state)
+        except VoiceCommandRejected as error:
+            self._output(f'Heard: "{error.recognition.transcript}"')
+            self._output(f"Error: {error.cause}")
+            self._output("Please try again.")
+            return False
+        except VoiceError as error:
+            self._output(str(error))
+            return False
+
+        self._output(f'Heard: "{result.recognition.transcript}"')
+        return self._handle_session_result(result.command_result)
+
+    def _announce_voice_state(self, state: VoiceState) -> None:
+        if state is VoiceState.LISTENING:
+            self._output("Listening...")
+        elif state is VoiceState.PROCESSING:
+            self._output("Processing...")
+
+    def _handle_session_result(self, result: SessionResult) -> bool:
+        if result.message is not None:
+            self._output(result.message)
+        if result.move_event is not None:
+            self._announce_state()
+        return result.quit_requested
 
     def _prompt(self) -> str:
         if self.game.is_game_over():

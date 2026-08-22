@@ -62,14 +62,42 @@ def test_parser_recognizes_cli_commands(command: CommandName) -> None:
         "move",
         "e9 e4",
         "e2 e4 dragon",
-        "knight to f3",
         "e2 e4 extra words",
         "Nh9",
         "e9",
         "Bx",
-        "pawn to e4",
+        "check",
+        "checkmate",
     ],
 )
 def test_parser_rejects_malformed_commands(text: str) -> None:
     with pytest.raises(InvalidCommandError):
         CommandParser().parse(text)
+
+
+@pytest.mark.parametrize(
+    ("spoken", "intent"),
+    [
+        ("pawn e4", SanMoveIntent("e4")),
+        ("pawn to e4", SanMoveIntent("e4")),
+        ("knight f3", SanMoveIntent("Nf3")),
+        ("knight to f3", SanMoveIntent("Nf3")),
+        ("bishop c4", SanMoveIntent("Bc4")),
+        ("bishop to b5", SanMoveIntent("Bb5")),
+        ("queen h5", SanMoveIntent("Qh5")),
+        ("queen takes d5", SanMoveIntent("Qxd5")),
+        ("rook takes e8 check", SanMoveIntent("Rxe8+")),
+        ("king g1", SanMoveIntent("Kg1")),
+        ("castle kingside", SanMoveIntent("O-O")),
+        ("castle queenside", SanMoveIntent("O-O-O")),
+        ("e takes d5", SanMoveIntent("exd5")),
+        ("knight g1 f3", MoveIntent("g1", "f3")),
+        ("nf3", SanMoveIntent("Nf3")),
+        ("e8=q", SanMoveIntent("e8=Q")),
+        ("o-o", SanMoveIntent("O-O")),
+    ],
+)
+def test_parser_accepts_narrow_spoken_piece_forms(
+    spoken: str, intent: MoveIntent | SanMoveIntent
+) -> None:
+    assert CommandParser().parse(spoken) == intent

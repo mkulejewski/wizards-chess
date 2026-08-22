@@ -13,6 +13,12 @@ dependencies = [
     "python-chess>=1.999",
 ]
 
+[project.optional-dependencies]
+voice = [
+    "faster-whisper>=1.2.1",
+    "sounddevice>=0.5.2",
+]
+
 [project.scripts]
 wizard-chess = "wizard_chess.main:run"
 

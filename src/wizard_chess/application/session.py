@@ -20,7 +20,9 @@ Coordinate forms:
   e2 e4 | e2-e4 | e2 to e4 | move e2 to e4
   e7 e8 queen (promotion: queen, rook, bishop, knight, or q/r/b/n)
 Commands:
-  undo, redo, fen, pgn, new, legal, help, quit"""
+  undo, redo, fen, pgn, new, legal, help, quit
+Voice input (terminal):
+  voice"""
 
 
 @dataclass(frozen=True, slots=True)

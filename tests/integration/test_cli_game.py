@@ -1,11 +1,14 @@
 from collections.abc import Iterator
 
+from wizard_chess.application.session import GameSession
 from wizard_chess.commands.intents import MoveIntent, SanMoveIntent
 from wizard_chess.commands.parser import CommandParser
 from wizard_chess.commands.resolver import MoveResolver
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.main import CliApplication
+from wizard_chess.speech.controller import VoiceController
+from wizard_chess.speech.mock import MockAudioInput, MockSpeechRecognizer
 
 
 def test_command_to_simulated_physical_board_pipeline() -> None:
@@ -142,3 +145,49 @@ def test_rejected_san_does_not_emit_physical_board_event() -> None:
     assert any(line.startswith("Error: Illegal SAN move") for line in output)
     assert app.game.fen() == original_fen
     assert physical_board.events == []
+
+
+def test_cli_mixes_voice_and_typed_commands_in_one_session() -> None:
+    inputs: Iterator[str] = iter(["voice", "e7 e5", "quit"])
+    output: list[str] = []
+    session = GameSession()
+    voice_controller = VoiceController(
+        MockAudioInput(),
+        MockSpeechRecognizer(["e four"]),
+        session.play_text,
+    )
+    app = CliApplication(
+        input_fn=lambda _prompt: next(inputs),
+        output_fn=output.append,
+        session=session,
+        voice_controller=voice_controller,
+    )
+
+    assert app.run() == 0
+    assert "Listening..." in output
+    assert "Processing..." in output
+    assert 'Heard: "e four"' in output
+    assert "Played: e4" in output
+    assert session.snapshot().move_history == ("e4", "e5")
+
+
+def test_cli_voice_failure_keeps_typed_input_available() -> None:
+    inputs: Iterator[str] = iter(["voice", "e2 e4", "quit"])
+    output: list[str] = []
+    session = GameSession()
+    voice_controller = VoiceController(
+        MockAudioInput(),
+        MockSpeechRecognizer(["knight before"]),
+        session.play_text,
+    )
+    app = CliApplication(
+        input_fn=lambda _prompt: next(inputs),
+        output_fn=output.append,
+        session=session,
+        voice_controller=voice_controller,
+    )
+
+    assert app.run() == 0
+    assert 'Heard: "knight before"' in output
+    assert "Please try again." in output
+    assert session.snapshot().move_history == ("e4",)

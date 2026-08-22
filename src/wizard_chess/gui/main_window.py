@@ -1,7 +1,7 @@
 """Main PySide6 window for the playable Wizard Chess desktop interface."""
 
 from collections.abc import Callable
-from typing import ClassVar
+from typing import ClassVar, cast
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
@@ -19,11 +19,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wizard_chess.application.session import GameSession
+from wizard_chess.application.session import GameSession, SessionResult
 from wizard_chess.domain.exceptions import WizardChessError
 from wizard_chess.gui.board_widget import ChessBoardWidget
 from wizard_chess.gui.interaction import BoardInteraction, ClickResult
 from wizard_chess.gui.view_model import format_game_status, format_move_history
+from wizard_chess.gui.voice_worker import VoiceWorker
+from wizard_chess.speech.controller import VoiceController
+from wizard_chess.speech.exceptions import VoiceCommandRejected
+from wizard_chess.speech.factory import create_default_voice_controller
+from wizard_chess.speech.models import VoiceCommandResult, VoiceState
 
 
 class MainWindow(QMainWindow):
@@ -36,9 +41,17 @@ class MainWindow(QMainWindow):
         "Knight": "n",
     }
 
-    def __init__(self, session: GameSession | None = None) -> None:
+    def __init__(
+        self,
+        session: GameSession | None = None,
+        voice_controller: VoiceController[SessionResult] | None = None,
+    ) -> None:
         super().__init__()
         self.session = session or GameSession()
+        self.voice_controller = voice_controller or create_default_voice_controller(
+            self.session.play_text
+        )
+        self._voice_worker: VoiceWorker | None = None
         self.interaction = BoardInteraction(self.session)
         self.setWindowTitle("Wizard Chess")
         self.resize(1040, 760)
@@ -54,6 +67,10 @@ class MainWindow(QMainWindow):
         self.command_input = QLineEdit()
         self.command_input.setPlaceholderText("Enter SAN or coordinates, e.g. Nf3 or g1 f3")
         self.play_button = QPushButton("Play")
+        self.voice_button = QPushButton("Speak Move")
+        self.voice_button.setAccessibleName("Speak Move")
+        self.voice_status_label = QLabel("Voice: Idle")
+        self.voice_status_label.setWordWrap(True)
         self.new_button = QPushButton("New Game")
         self.undo_button = QPushButton("Undo")
         self.redo_button = QPushButton("Redo")
@@ -65,6 +82,11 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._connect_signals()
         self.refresh()
+
+    @property
+    def voice_active(self) -> bool:
+        """Return whether the GUI currently owns a running voice worker."""
+        return self._voice_worker is not None
 
     def refresh(self) -> None:
         """Rerender every stateful view from the authoritative session."""
@@ -82,6 +104,7 @@ class MainWindow(QMainWindow):
         self.redo_button.setEnabled(snapshot.can_redo)
         self.command_input.setEnabled(not snapshot.result.is_over)
         self.play_button.setEnabled(not snapshot.result.is_over)
+        self.voice_button.setEnabled(not snapshot.result.is_over and not self.voice_active)
 
     def _build_layout(self) -> None:
         central = QWidget()
@@ -120,11 +143,13 @@ class MainWindow(QMainWindow):
         command_row.addWidget(QLabel("Move:"))
         command_row.addWidget(self.command_input, 1)
         command_row.addWidget(self.play_button)
+        command_row.addWidget(self.voice_button)
         outer.addLayout(command_row)
 
         self.status_label.setStyleSheet("font-size: 17px; font-weight: 600;")
         self.feedback_label.setStyleSheet("color: #8b3a2b;")
         outer.addWidget(self.status_label)
+        outer.addWidget(self.voice_status_label)
         outer.addWidget(self.feedback_label)
         self.setCentralWidget(central)
 
@@ -132,6 +157,7 @@ class MainWindow(QMainWindow):
         self.board_widget.square_clicked.connect(self._on_board_square)
         self.play_button.clicked.connect(self._submit_text)
         self.command_input.returnPressed.connect(self._submit_text)
+        self.voice_button.clicked.connect(self._start_voice)
         self.new_button.clicked.connect(self._new_game)
         self.undo_button.clicked.connect(self._undo)
         self.redo_button.clicked.connect(self._redo)
@@ -181,6 +207,85 @@ class MainWindow(QMainWindow):
         except WizardChessError as error:
             self._show_feedback(str(error))
         self.refresh()
+
+    def _start_voice(self) -> None:
+        if self._voice_worker is not None:
+            self.voice_status_label.setText("Voice: Already listening or processing")
+            return
+
+        worker = VoiceWorker(self.voice_controller)
+        self._voice_worker = worker
+        worker.state_changed.connect(self._on_voice_state)
+        worker.succeeded.connect(self._on_voice_success)
+        worker.failed.connect(self._on_voice_failure)
+        worker.finished.connect(self._on_voice_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._set_interaction_enabled(False)
+        self.voice_status_label.setText("Voice: Listening...")
+        worker.start()
+
+    def _on_voice_state(self, state: object) -> None:
+        if state is VoiceState.LISTENING:
+            self.voice_status_label.setText("Voice: Listening...")
+        elif state is VoiceState.PROCESSING:
+            self.voice_status_label.setText("Voice: Processing...")
+        elif state is VoiceState.SUCCESS:
+            self.voice_status_label.setText("Voice: Success")
+        elif state is VoiceState.ERROR:
+            self.voice_status_label.setText("Voice: Error")
+
+    def _on_voice_success(self, result: object) -> None:
+        if not isinstance(result, VoiceCommandResult):
+            self.voice_status_label.setText("Voice: Error\nUnexpected voice result.")
+            return
+        voice_result = cast(VoiceCommandResult[SessionResult], result)
+        recognition = voice_result.recognition
+        session_result = voice_result.command_result
+        detail = session_result.message or "Done."
+        self.voice_status_label.setText(
+            f'Voice: Success\nHeard: "{recognition.transcript}"\n{detail}'
+        )
+        self.interaction.clear_selection()
+        self._show_feedback(detail, error=False)
+        if session_result.quit_requested:
+            self.close()
+            return
+        self.refresh()
+
+    def _on_voice_failure(self, error: object) -> None:
+        if isinstance(error, VoiceCommandRejected):
+            message = (
+                f'Voice: Error\nHeard: "{error.recognition.transcript}"\n'
+                f"{error.cause}\nPlease try again."
+            )
+            feedback = str(error.cause)
+        elif isinstance(error, Exception):
+            message = f"Voice: Error\n{error}"
+            feedback = str(error)
+        else:
+            message = "Voice: Error\nUnexpected voice failure."
+            feedback = "Unexpected voice failure."
+        self.voice_status_label.setText(message)
+        self._show_feedback(feedback)
+        self.refresh()
+
+    def _on_voice_finished(self) -> None:
+        self._voice_worker = None
+        self._set_interaction_enabled(True)
+        self.refresh()
+
+    def _set_interaction_enabled(self, enabled: bool) -> None:
+        self.board_widget.setEnabled(enabled)
+        self.command_input.setEnabled(enabled)
+        self.play_button.setEnabled(enabled)
+        self.new_button.setEnabled(enabled)
+        self.undo_button.setEnabled(enabled)
+        self.redo_button.setEnabled(enabled)
+        self.flip_button.setEnabled(enabled)
+        self.fen_input.setEnabled(enabled)
+        self.load_fen_button.setEnabled(enabled)
+        self.copy_fen_button.setEnabled(enabled)
+        self.voice_button.setEnabled(enabled)
 
     def _new_game(self) -> None:
         self.session.new_game()
@@ -234,4 +339,7 @@ class MainWindow(QMainWindow):
         self.feedback_label.setText(message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self._voice_worker is not None and self._voice_worker.isRunning():
+            self._voice_worker.cancel()
+            self._voice_worker.wait()
         event.accept()
