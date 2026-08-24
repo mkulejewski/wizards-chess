@@ -22,7 +22,7 @@ from wizard_chess.configuration import (
 class SettingsStore:
     """Read current settings and tolerate missing fields from older schemas."""
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -56,10 +56,10 @@ class SettingsStore:
                     raw.get("confidence_threshold"), fallback.confidence_threshold
                 ),
                 engine=EngineSettings(
-                    enabled=bool(engine.get("enabled", fallback.engine.enabled)),
+                    enabled=_bool_value(engine.get("enabled"), fallback.engine.enabled),
                     path=_optional_string(engine.get("path", fallback.engine.path)),
-                    analysis_enabled=bool(
-                        engine.get("analysis_enabled", fallback.engine.analysis_enabled)
+                    analysis_enabled=_bool_value(
+                        engine.get("analysis_enabled"), fallback.engine.analysis_enabled
                     ),
                     analysis_time_ms=_int_value(
                         engine.get("analysis_time_ms"), fallback.engine.analysis_time_ms
@@ -83,7 +83,7 @@ class SettingsStore:
                     ),
                 ),
                 clock=ClockSettings(
-                    enabled=bool(clock.get("enabled", fallback.clock.enabled)),
+                    enabled=_bool_value(clock.get("enabled"), fallback.clock.enabled),
                     initial_seconds=_float_value(
                         clock.get("initial_seconds"), fallback.clock.initial_seconds
                     ),
@@ -91,7 +91,14 @@ class SettingsStore:
                         clock.get("increment_seconds"), fallback.clock.increment_seconds
                     ),
                 ),
-                autosave=bool(raw.get("autosave", fallback.autosave)),
+                game_setup_saved=_bool_value(
+                    raw.get("game_setup_saved"), fallback.game_setup_saved
+                ),
+                show_game_setup_on_startup=_bool_value(
+                    raw.get("show_game_setup_on_startup"),
+                    fallback.show_game_setup_on_startup,
+                ),
+                autosave=_bool_value(raw.get("autosave"), fallback.autosave),
                 logging_level=str(raw.get("logging_level", fallback.logging_level)),
             )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
@@ -109,6 +116,20 @@ def _optional_int(value: object) -> int | None:
 def _int_value(value: object, default: int) -> int:
     if isinstance(value, (str, int, float)):
         return int(value)
+    return default
+
+
+def _bool_value(value: object, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
     return default
 
 

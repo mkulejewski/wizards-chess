@@ -6,9 +6,11 @@ from wizard_chess.configuration import (
     ApplicationSettings,
     ClockSettings,
     EngineSettings,
+    EngineStrength,
     PlayerKind,
     PlayerSettings,
     VoiceLanguage,
+    should_show_game_setup,
 )
 from wizard_chess.persistence.settings_store import SettingsStore
 
@@ -47,8 +49,19 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
     path = tmp_path / "settings.json"
     settings = ApplicationSettings(
         voice_language=VoiceLanguage.POLISH,
-        engine=EngineSettings(enabled=True, path="stockfish", multipv=2),
-        players=PlayerSettings(black_kind=PlayerKind.ENGINE),
+        engine=EngineSettings(
+            enabled=True,
+            path="stockfish",
+            analysis_time_ms=2500,
+            multipv=2,
+            strength=EngineStrength.STRONG_CLUB,
+        ),
+        players=PlayerSettings(
+            white_kind=PlayerKind.ENGINE,
+            black_kind=PlayerKind.HUMAN,
+        ),
+        game_setup_saved=True,
+        show_game_setup_on_startup=False,
         autosave=True,
     )
     store = SettingsStore(path)
@@ -63,8 +76,80 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
     assert defaulted.voice_language is VoiceLanguage.ENGLISH
 
 
+def test_environment_values_override_persisted_values_without_replacing_them() -> None:
+    persisted = ApplicationSettings(
+        engine=EngineSettings(
+            path="/persisted/stockfish",
+            strength=EngineStrength.CLUB,
+            analysis_time_ms=1500,
+            analysis_depth=12,
+        ),
+        players=PlayerSettings(black_kind=PlayerKind.ENGINE),
+    )
+
+    effective = ApplicationSettings.from_environment(
+        persisted,
+        {
+            "WIZARD_CHESS_ENGINE_STRENGTH": "expert",
+            "WIZARD_CHESS_ENGINE_TIME_MS": "3000",
+            "WIZARD_CHESS_ENGINE_PATH": "",
+            "WIZARD_CHESS_ENGINE_DEPTH": "",
+            "WIZARD_CHESS_WHITE_PLAYER": "engine",
+            "WIZARD_CHESS_BLACK_PLAYER": "human",
+        },
+    )
+
+    assert effective.engine.strength is EngineStrength.EXPERT
+    assert effective.engine.analysis_time_ms == 3000
+    assert effective.engine.path is None
+    assert effective.engine.analysis_depth is None
+    assert effective.engine.enabled
+    assert effective.players.white_kind is PlayerKind.ENGINE
+    assert effective.players.black_kind is PlayerKind.HUMAN
+    assert persisted.engine.strength is EngineStrength.CLUB
+    assert (
+        ApplicationSettings.from_environment(persisted, {}).engine.strength is EngineStrength.CLUB
+    )
+
+
+def test_startup_setup_policy_covers_first_run_saved_reuse_and_forcing() -> None:
+    first_run = ApplicationSettings()
+    ask_each_time = ApplicationSettings(
+        game_setup_saved=True,
+        show_game_setup_on_startup=True,
+    )
+    automatic = ApplicationSettings(
+        game_setup_saved=True,
+        show_game_setup_on_startup=False,
+    )
+
+    assert should_show_game_setup(first_run, environment={})
+    assert not should_show_game_setup(
+        first_run,
+        environment={"WIZARD_CHESS_WHITE_PLAYER": "engine"},
+    )
+    assert should_show_game_setup(ask_each_time, environment={})
+    assert not should_show_game_setup(automatic, environment={})
+    assert should_show_game_setup(automatic, force=True, environment={})
+
+
 def test_invalid_settings_file_gracefully_uses_defaults(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
     path.write_text("not json", encoding="utf-8")
 
     assert SettingsStore(path).load() == ApplicationSettings()
+
+
+def test_malformed_optional_startup_settings_use_defaults(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"schema_version": 2, "settings": {'
+        '"game_setup_saved": "not-a-boolean", '
+        '"show_game_setup_on_startup": "also-invalid"}}',
+        encoding="utf-8",
+    )
+
+    loaded = SettingsStore(path).load()
+
+    assert not loaded.game_setup_saved
+    assert loaded.show_game_setup_on_startup

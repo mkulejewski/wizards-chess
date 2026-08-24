@@ -59,8 +59,9 @@ class StockfishEngine:
             raise EngineUnavailableError("Chess engine features are disabled")
         if not self.settings.path:
             raise EngineUnavailableError(
-                "Stockfish is not configured; set WIZARD_CHESS_ENGINE_PATH"
+                "Stockfish is not configured; choose an executable in Engine Preferences"
             )
+        engine: chess.engine.SimpleEngine | None = None
         try:
             engine = chess.engine.SimpleEngine.popen_uci(self.settings.path)
             available = engine.options
@@ -74,6 +75,11 @@ class StockfishEngine:
             if options:
                 engine.configure(options)
         except (OSError, ValueError, chess.engine.EngineError) as error:
+            if engine is not None:
+                try:
+                    engine.quit()
+                except (chess.engine.EngineError, OSError):
+                    LOGGER.debug("Temporary engine cleanup failed", exc_info=True)
             LOGGER.warning("Stockfish startup failed: %s", error)
             raise EngineUnavailableError(
                 f"Stockfish could not be started from {self.settings.path!r}"

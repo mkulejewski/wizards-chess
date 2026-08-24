@@ -62,6 +62,12 @@ The GUI is the default. Start the retained terminal adapter with:
 uv run wizard-chess --cli
 ```
 
+On the first graphical launch, **Game Setup** asks who controls White and Black, player names,
+Stockfish strength/think time when needed, and clock settings. Keep **Remember these choices**
+and **Start with this setup automatically next time** selected to make later launches open the
+saved game configuration immediately. Use **New Game…** to change sides later, or launch with
+`uv run wizard-chess --setup` to force the dialog once.
+
 Keyboard, GUI, PGN/FEN, clocks, and human-vs-human play do not require a microphone or
 Stockfish.
 
@@ -72,7 +78,7 @@ The GUI provides:
 - click-to-move with legal destinations, last-move highlighting, promotion choice, and flip;
 - typed SAN, coordinate syntax, and application commands;
 - move history plus a ply slider for inspecting old positions without changing the live game;
-- New Game, Undo, Redo, FEN load/copy, and PGN import/export;
+- Game Setup/New Game, Engine Preferences, Undo, Redo, FEN load/copy, and PGN import/export;
 - optional clock start/pause/reset and English/Polish voice-language selection;
 - non-blocking live evaluation, MultiPV candidates, principal variation, and evaluation bar;
 - non-blocking engine opponent replies and post-game analysis with progress and summaries;
@@ -89,7 +95,24 @@ as a fake move.
 ## Stockfish
 
 Install Stockfish using the operating system package manager or an official compatible
-distribution. Wizard Chess does not bundle a binary. Enable it and provide an executable:
+distribution. Wizard Chess does not bundle a binary. The normal graphical workflow is:
+
+1. Launch `uv run wizard-chess`.
+2. Open **Preferences…** and select the Stockfish executable if it is not already on `PATH`.
+3. Use **Test Engine** to validate the executable.
+4. In **Game Setup**, choose Human or Stockfish for White and Black.
+5. Choose strength, think time, and optional clock settings.
+6. Remember the setup and choose whether to show Game Setup or reuse it automatically.
+
+Engine Preferences also contains live analysis, MultiPV, depth, threads, and hash size. The
+preferences are persisted in Wizard Chess's existing XDG-backed `settings.json`; future starts
+then require only `uv run wizard-chess`. Choosing Stockfish as either player enables the engine
+implicitly. If no path is saved, Wizard Chess discovers `stockfish` on `PATH`.
+
+### Advanced environment configuration
+
+Environment variables remain available for CI, scripts, development, headless launches, and
+one-shot overrides. For example:
 
 ```bash
 WIZARD_CHESS_ENGINE_ENABLED=true \
@@ -100,6 +123,18 @@ uv run wizard-chess
 
 If no path is supplied, enabled mode tries `stockfish` on `PATH`. Configuration is external;
 there is no platform-specific hard-coded path.
+
+Configuration precedence is:
+
+```text
+explicit CLI override (where applicable)
+> WIZARD_CHESS_* environment variable
+> persistent Wizard Chess preference
+> built-in default
+```
+
+An environment override changes only the current process and is not written back merely by
+launching the application.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -116,7 +151,7 @@ there is no platform-specific hard-coded path.
 Strength values are `beginner`, `casual`, `club`, `strong_club`, `expert`, `master`, and
 `maximum`. They map to supported engine controls and are not advertised as exact Elo ratings.
 
-Choose an engine side externally:
+Choose an engine side from a script or other environment-only launch:
 
 ```bash
 WIZARD_CHESS_ENGINE_ENABLED=true \

@@ -145,6 +145,9 @@ def test_gui_controls_refresh_undo_redo_flip_and_new_game(
     assert session.snapshot().move_history == before_flip.move_history
 
     QTest.mouseClick(window.new_button, Qt.MouseButton.LeftButton)
+    setup_dialog = window.game_setup_dialog
+    assert setup_dialog is not None
+    setup_dialog.accept()
     snapshot = session.snapshot()
     assert snapshot.move_history == ()
     assert snapshot.last_move is None

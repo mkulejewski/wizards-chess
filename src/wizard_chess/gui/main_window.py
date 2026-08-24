@@ -26,13 +26,15 @@ from PySide6.QtWidgets import (
 )
 
 from wizard_chess.application.session import GameSession, SessionResult
-from wizard_chess.configuration import VoiceLanguage
+from wizard_chess.configuration import ApplicationSettings, VoiceLanguage
 from wizard_chess.domain.exceptions import WizardChessError
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.engine.models import PositionAnalysis, evaluation_share
 from wizard_chess.gui.analysis_worker import GameAnalysisWorker, format_game_analysis
 from wizard_chess.gui.board_widget import ChessBoardWidget
+from wizard_chess.gui.engine_preferences import EnginePreferencesDialog, EngineValidator
 from wizard_chess.gui.engine_worker import EngineWorker
+from wizard_chess.gui.game_setup import GameSetupDialog
 from wizard_chess.gui.interaction import BoardInteraction, ClickResult
 from wizard_chess.gui.view_model import format_game_status, format_move_history
 from wizard_chess.gui.voice_worker import VoiceWorker
@@ -60,11 +62,26 @@ class MainWindow(QMainWindow):
         session: GameSession | None = None,
         voice_controller: VoiceController[SessionResult] | None = None,
         settings_store: SettingsStore | None = None,
+        persistent_settings: ApplicationSettings | None = None,
+        startup_setup_pending: bool = False,
+        engine_validator: EngineValidator | None = None,
     ) -> None:
         super().__init__()
         self.session = session or GameSession()
         self._owns_voice_controller = voice_controller is None
         self._settings_store = settings_store
+        self._persistent_settings = (
+            persistent_settings
+            if persistent_settings is not None
+            else settings_store.load()
+            if settings_store is not None
+            else self.session.settings
+        )
+        self._startup_setup_pending = startup_setup_pending
+        self._startup_dialog_open = False
+        self._engine_validator = engine_validator
+        self._game_setup_dialog: GameSetupDialog | None = None
+        self._engine_preferences_dialog: EnginePreferencesDialog | None = None
         self.voice_controller = voice_controller or create_default_voice_controller(
             self.session.play_text
         )
@@ -94,7 +111,8 @@ class MainWindow(QMainWindow):
         self.voice_button.setAccessibleName("Speak Move")
         self.voice_status_label = QLabel("Voice: Idle")
         self.voice_status_label.setWordWrap(True)
-        self.new_button = QPushButton("New Game")
+        self.new_button = QPushButton("New Game…")
+        self.preferences_button = QPushButton("Preferences…")
         self.undo_button = QPushButton("Undo")
         self.redo_button = QPushButton("Redo")
         self.flip_button = QPushButton("Flip Board")
@@ -147,6 +165,16 @@ class MainWindow(QMainWindow):
         """Return whether post-game analysis is running in the background."""
         return self._game_analysis_worker is not None
 
+    @property
+    def game_setup_dialog(self) -> GameSetupDialog | None:
+        """Expose the currently open setup dialog for deterministic GUI adapters/tests."""
+        return self._game_setup_dialog
+
+    @property
+    def engine_preferences_dialog(self) -> EnginePreferencesDialog | None:
+        """Expose the currently open preferences dialog, if any."""
+        return self._engine_preferences_dialog
+
     def refresh(self) -> None:
         """Rerender every stateful view from the authoritative session."""
         live_snapshot = self.session.snapshot()
@@ -197,6 +225,7 @@ class MainWindow(QMainWindow):
 
         actions = QHBoxLayout()
         actions.addWidget(self.new_button)
+        actions.addWidget(self.preferences_button)
         actions.addWidget(self.undo_button)
         actions.addWidget(self.redo_button)
         actions.addWidget(self.flip_button)
@@ -274,6 +303,7 @@ class MainWindow(QMainWindow):
         self.command_input.returnPressed.connect(self._submit_text)
         self.voice_button.clicked.connect(self._start_voice)
         self.new_button.clicked.connect(self._new_game)
+        self.preferences_button.clicked.connect(self._open_preferences)
         self.undo_button.clicked.connect(self._undo)
         self.redo_button.clicked.connect(self._redo)
         self.flip_button.clicked.connect(self._flip)
@@ -405,6 +435,7 @@ class MainWindow(QMainWindow):
         self.command_input.setEnabled(enabled)
         self.play_button.setEnabled(enabled)
         self.new_button.setEnabled(enabled)
+        self.preferences_button.setEnabled(enabled)
         self.undo_button.setEnabled(enabled)
         self.redo_button.setEnabled(enabled)
         self.flip_button.setEnabled(enabled)
@@ -422,11 +453,130 @@ class MainWindow(QMainWindow):
         self.voice_button.setEnabled(enabled)
 
     def _new_game(self) -> None:
-        self.session.new_game()
+        self._open_game_setup()
+
+    def show_startup_setup(self) -> None:
+        """Present the deferred startup setup without beginning engine play first."""
+        self._startup_setup_pending = True
+        self._open_game_setup(startup=True)
+
+    def _open_game_setup(self, *, startup: bool = False) -> None:
+        if self._game_setup_dialog is not None:
+            self._game_setup_dialog.raise_()
+            self._game_setup_dialog.activateWindow()
+            return
+        base = ApplicationSettings.from_environment(self._persistent_settings)
+        dialog = GameSetupDialog(
+            base,
+            self,
+            engine_available=lambda path: self._engine_path_available(path),
+        )
+        self._game_setup_dialog = dialog
+        self._startup_dialog_open = startup
+        dialog.engine_preferences_requested.connect(self._open_preferences)
+        dialog.accepted.connect(self._apply_game_setup)
+        dialog.rejected.connect(self._cancel_game_setup)
+        dialog.finished.connect(self._game_setup_finished)
+        dialog.open()
+
+    def _apply_game_setup(self) -> None:
+        dialog = self._game_setup_dialog
+        if dialog is None:
+            return
+        selected = dialog.selected_settings()
+        if selected.game_setup_saved:
+            saved = selected
+        else:
+            saved = replace(
+                self._persistent_settings,
+                game_setup_saved=False,
+                show_game_setup_on_startup=True,
+            )
+        self._save_preferences(saved)
+        effective = ApplicationSettings.from_environment(selected)
+        self._cancel_engine_activity()
+        self.session.new_game(effective)
+        self._engine_failed = False
+        self._last_analysis_fen = None
         self._viewed_ply = None
         self.interaction.clear_selection()
+        self._startup_setup_pending = False
+        self._startup_dialog_open = False
         self._show_feedback("Started a new game.", error=False)
         self.refresh()
+
+    def _cancel_game_setup(self) -> None:
+        if not self._startup_dialog_open:
+            return
+        self._startup_dialog_open = False
+        self._startup_setup_pending = False
+        self.refresh()
+
+    def _game_setup_finished(self, _result: int) -> None:
+        self._game_setup_dialog = None
+
+    def _open_preferences(self) -> None:
+        if self._engine_preferences_dialog is not None:
+            self._engine_preferences_dialog.raise_()
+            self._engine_preferences_dialog.activateWindow()
+            return
+        parent = self._game_setup_dialog or self
+        dialog = (
+            EnginePreferencesDialog(self._persistent_settings, parent)
+            if self._engine_validator is None
+            else EnginePreferencesDialog(
+                self._persistent_settings,
+                parent,
+                validator=self._engine_validator,
+            )
+        )
+        self._engine_preferences_dialog = dialog
+        dialog.accepted.connect(self._apply_engine_preferences)
+        dialog.finished.connect(self._engine_preferences_finished)
+        dialog.open()
+
+    def _apply_engine_preferences(self) -> None:
+        dialog = self._engine_preferences_dialog
+        if dialog is None:
+            return
+        selected = dialog.selected_settings()
+        self._save_preferences(selected)
+        if self._game_setup_dialog is not None:
+            self._game_setup_dialog.set_engine_settings(
+                ApplicationSettings.from_environment(selected)
+            )
+        self._show_feedback(
+            "Engine preferences saved. They apply when the next game starts.",
+            error=False,
+        )
+
+    def _engine_preferences_finished(self, _result: int) -> None:
+        self._engine_preferences_dialog = None
+
+    def _save_preferences(self, settings: ApplicationSettings) -> None:
+        self._persistent_settings = settings
+        if self._settings_store is None:
+            return
+        try:
+            self._settings_store.save(settings)
+        except OSError:
+            self._show_feedback("Preferences changed, but they could not be saved.")
+
+    @staticmethod
+    def _engine_path_available(path: str | None) -> bool:
+        from wizard_chess.engine.factory import resolve_stockfish_path
+
+        return resolve_stockfish_path(path) is not None
+
+    def _cancel_engine_activity(self) -> None:
+        if self._engine_worker is not None and self._engine_worker.isRunning():
+            self._engine_worker.cancel()
+            self._engine_worker.wait()
+        self._engine_worker = None
+        if self._game_analysis_worker is not None and self._game_analysis_worker.isRunning():
+            self._game_analysis_worker.cancel()
+            self._game_analysis_worker.wait()
+        self._game_analysis_worker = None
 
     def _undo(self) -> None:
         self._perform_state_action(
@@ -530,11 +680,7 @@ class MainWindow(QMainWindow):
             return
         language = VoiceLanguage(raw_language)
         self.session.set_voice_language(language)
-        if self._settings_store is not None:
-            try:
-                self._settings_store.save(self.session.settings)
-            except OSError:
-                self._show_feedback("Voice language changed, but preferences could not be saved.")
+        self._save_preferences(replace(self._persistent_settings, voice_language=language))
         if self._owns_voice_controller:
             config = replace(VoiceConfig.from_environment(), language=language)
             self.voice_controller = create_default_voice_controller(
@@ -600,6 +746,8 @@ class MainWindow(QMainWindow):
 
     def _request_engine_work(self, fen: str) -> None:
         engine = self.session.engine
+        if self._startup_setup_pending:
+            return
         if self._closing or engine is None or self._engine_failed:
             if engine is None:
                 self.engine_status_label.setText("Engine: Disabled (ordinary play is available)")

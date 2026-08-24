@@ -32,6 +32,7 @@ Status meanings:
 | Stage 2.6 / Increment E — Polish core | Complete; manual acceptance pending | Explicit Polish recognizer hint/model selection, deterministic normalizer, targeted piece/rank/file inflections and ASR forms, moves/captures/origins/castling/check/promotion/application commands, GUI language selection, English fallback, equivalence and full-pipeline tests. Live microphone acceptance is pending. |
 | Stage 2.4 / Increment F — game analysis | Complete; manual acceptance pending | Immutable replay, FEN cache, before/after score, preferred move/PV, deterministic classification policy, ACPL/count statistics, versioned JSON, async GUI progress/summary. Real-Stockfish performance acceptance is pending. |
 | Stage 2.5 / Increment G — hardening/tooling | Complete | Configurable logging, controlled subsystem errors, scripted-game CLI through `GameSession`, fake engine and speech, autosave/schema defaults, graceful optional-component failure, integration coverage, Stage 3 event seam, updated documentation. |
+| Stage 2.7 — launch configuration and game setup | Complete; manual acceptance pending | XDG-persisted game/setup defaults, corrected default/persistent/environment precedence, first-run or automatic-reuse startup policy, Game Setup presets/player names/clocks/strength/think time, Engine Preferences path/validation/live/advanced controls, atomic `GameSession` reconfiguration, async engine-as-White coverage, headless CLI/script preservation. A real Stockfish handshake and offscreen async White move passed; interactive browse/save/relaunch acceptance remains pending. |
 
 ## Verification record
 
@@ -46,12 +47,14 @@ uv run pyright
 
 Final clean run on 2026-08-24:
 
-- `uv run pytest` — **267 passed**.
+- `uv run pytest` — **282 passed**.
 - `uv run ruff check .` — **passed**.
-- `uv run ruff format --check .` — **81 files already formatted**.
+- `uv run ruff format --check .` — **85 files already formatted**.
 - `uv run pyright` — **0 errors, 0 warnings**.
 - `uv run wizard-chess --script examples/game.txt` — completed Scholar's mate and produced
   the expected final FEN.
+- Installed Stockfish — validation handshake passed; an offscreen GUI session produced `e4`
+  through canonical event `e2e4` as White and closed cleanly.
 
 Manual acceptance still required on a machine with the relevant optional systems:
 
@@ -60,6 +63,9 @@ Manual acceptance still required on a machine with the relevant optional systems
    cancellation/stale-result handling, and clean process shutdown.
 3. Install the voice extra and exercise English and Polish commands using a microphone.
 4. Verify recovery after terminating an autosave-enabled session.
+5. Configure `/home/mkulejewski/.local/bin/stockfish` in Engine Preferences, select Stockfish
+   as White with `strong_club` strength and 2.5 seconds, remember/reuse the setup, relaunch
+   with only `uv run wizard-chess`, then repeat with Stockfish as Black.
 
 ## Deferred stages
 

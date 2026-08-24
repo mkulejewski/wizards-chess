@@ -1,6 +1,7 @@
 """Reusable application session shared by every input and output adapter."""
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -10,7 +11,12 @@ from wizard_chess.application.clock import ChessClock, ClockSnapshot
 from wizard_chess.commands.intents import CommandIntent, CommandName, MoveCommandIntent
 from wizard_chess.commands.language import LanguageCommandParser
 from wizard_chess.commands.resolver import MoveResolver
-from wizard_chess.configuration import ApplicationSettings, PlayerKind, VoiceLanguage
+from wizard_chess.configuration import (
+    ApplicationSettings,
+    EngineSettings,
+    PlayerKind,
+    VoiceLanguage,
+)
 from wizard_chess.domain.events import MoveExecuted
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
@@ -23,6 +29,8 @@ from wizard_chess.localization import translate
 from wizard_chess.persistence.game_store import GameStore
 
 LOGGER = logging.getLogger(__name__)
+
+EngineFactory = Callable[[EngineSettings], ChessEngine | None]
 
 HELP_TEXT = """Moves (SAN):
   e4 | Nf3 | exd5 | O-O | e8=Q
@@ -75,17 +83,19 @@ class GameSession:
         *,
         settings: ApplicationSettings | None = None,
         engine: ChessEngine | None = None,
+        engine_factory: EngineFactory = create_stockfish_engine,
         game_store: GameStore | None = None,
         clock: ChessClock | None = None,
     ) -> None:
-        self.settings = settings or ApplicationSettings.from_environment()
+        self.settings = (settings or ApplicationSettings.from_environment()).with_required_engine()
         self._physical_board = (
             physical_board if physical_board is not None else SimulatedPhysicalBoard()
         )
         self._parser = LanguageCommandParser(self.settings.voice_language)
         self._resolver = MoveResolver()
         self._game = self._new_configured_game()
-        self._engine = engine or create_stockfish_engine(self.settings.engine)
+        self._engine_factory = engine_factory
+        self._engine = engine if engine is not None else self._engine_factory(self.settings.engine)
         self._game_store = game_store
         self._clock = clock or ChessClock(self.settings.clock)
         self._analysis_enabled = self.settings.engine.analysis_enabled
@@ -208,13 +218,41 @@ class GameSession:
         self._autosave()
         return event
 
-    def new_game(self) -> None:
-        """Replace the authoritative game with a fresh starting position."""
+    def new_game(self, settings: ApplicationSettings | None = None) -> None:
+        """Atomically apply optional setup and replace the authoritative game."""
+        if settings is not None:
+            self._configure_new_game(settings)
+            return
         self._game = self._new_configured_game()
         self._clock.reset(self._game.turn)
         self._last_feedback = None
         self._autosave()
         LOGGER.info("New game")
+
+    def _configure_new_game(self, settings: ApplicationSettings) -> None:
+        configured = settings.with_required_engine()
+        replacement_engine = self._engine_factory(configured.engine)
+        replacement_clock = ChessClock(configured.clock)
+        replacement_game = ChessGame(
+            metadata={
+                "White": configured.players.white_name,
+                "Black": configured.players.black_name,
+            }
+        )
+
+        self._clock.pause()
+        previous_engine = self._engine
+        self.settings = configured
+        self._parser = LanguageCommandParser(configured.voice_language)
+        self._engine = replacement_engine
+        self._clock = replacement_clock
+        self._game = replacement_game
+        self._analysis_enabled = configured.engine.analysis_enabled
+        self._last_feedback = None
+        if previous_engine is not None:
+            previous_engine.close()
+        self._autosave()
+        LOGGER.info("New configured game")
 
     def load_fen(self, fen: str) -> None:
         """Load a validated position and clear its unavailable history."""

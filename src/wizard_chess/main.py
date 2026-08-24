@@ -141,9 +141,11 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Wizard Chess")
     parser.add_argument("--cli", action="store_true", help="run the terminal interface")
     parser.add_argument("--script", help="play a UTF-8 command script and exit")
+    parser.add_argument("--setup", action="store_true", help="show Game Setup at GUI launch")
     arguments = parser.parse_args(list(argv) if argv is not None else None)
     settings_store = SettingsStore(_configuration_directory() / "settings.json")
-    settings = settings_store.load(ApplicationSettings.from_environment())
+    persistent_settings = settings_store.load()
+    settings = ApplicationSettings.from_environment(persistent_settings)
     logging.basicConfig(
         level=settings.logging_level,
         format="%(asctime)s %(levelname)s %(name)s event=%(message)s",
@@ -164,6 +166,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         sys.argv if argv is None else [sys.argv[0], *argv],
         session=_create_session(settings),
         settings_store=settings_store,
+        persistent_settings=persistent_settings,
+        force_setup=arguments.setup,
     )
 
 
