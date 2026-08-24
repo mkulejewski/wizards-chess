@@ -2,10 +2,13 @@
 
 from collections.abc import Callable
 
+from wizard_chess.configuration import VoiceLanguage
 from wizard_chess.speech.audio import SoundDeviceAudioInput
 from wizard_chess.speech.config import VoiceConfig
 from wizard_chess.speech.controller import VoiceController
 from wizard_chess.speech.faster_whisper import FasterWhisperRecognizer
+from wizard_chess.speech.normalizer import TranscriptNormalizer
+from wizard_chess.speech.polish import PolishTranscriptNormalizer
 
 
 def create_default_voice_controller[CommandResultT](
@@ -22,5 +25,11 @@ def create_default_voice_controller[CommandResultT](
         silence_seconds=settings.silence_seconds,
         silence_threshold=settings.silence_threshold,
     )
-    recognizer = FasterWhisperRecognizer(settings.model, language=settings.language)
-    return VoiceController(audio_input, recognizer, submit_command)
+    language = None if settings.language is VoiceLanguage.AUTO else settings.language.value
+    recognizer = FasterWhisperRecognizer(settings.model, language=language)
+    normalizer = (
+        PolishTranscriptNormalizer()
+        if settings.language is VoiceLanguage.POLISH
+        else TranscriptNormalizer()
+    )
+    return VoiceController(audio_input, recognizer, submit_command, normalizer)

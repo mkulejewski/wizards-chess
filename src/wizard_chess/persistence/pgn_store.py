@@ -11,3 +11,7 @@ class PgnStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(pgn.rstrip() + "\n", encoding="utf-8")
         return path
+
+    def load(self, source: str | Path) -> str:
+        """Load UTF-8 PGN text for validation by the domain layer."""
+        return Path(source).read_text(encoding="utf-8")

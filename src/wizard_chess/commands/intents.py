@@ -20,6 +20,44 @@ class SanMoveIntent:
     notation: str
 
 
+class PieceName(StrEnum):
+    """Language-independent chess piece vocabulary for contextual commands."""
+
+    PAWN = "pawn"
+    KNIGHT = "knight"
+    BISHOP = "bishop"
+    ROOK = "rook"
+    QUEEN = "queen"
+    KING = "king"
+
+
+class CastleSide(StrEnum):
+    """A requested castling wing."""
+
+    KINGSIDE = "kingside"
+    QUEENSIDE = "queenside"
+
+
+class CheckClaim(StrEnum):
+    """Optional spoken assertion about the resulting position."""
+
+    CHECK = "check"
+    CHECKMATE = "checkmate"
+
+
+@dataclass(frozen=True, slots=True)
+class ContextualMoveIntent:
+    """Language-neutral partial move resolved only from authoritative legal moves."""
+
+    destination: str | None = None
+    piece: PieceName | None = None
+    origin: str | None = None
+    capture: bool | None = None
+    promotion: str | None = None
+    castle: CastleSide | None = None
+    check_claim: CheckClaim | None = None
+
+
 class CommandName(StrEnum):
     """Commands handled by the development CLI."""
 
@@ -31,6 +69,12 @@ class CommandName(StrEnum):
     QUIT = "quit"
     HELP = "help"
     LEGAL = "legal"
+    RESIGN = "resign"
+    DRAW = "draw"
+    SAVE = "save"
+    REPEAT = "repeat"
+    ANALYSIS_ON = "analysis_on"
+    ANALYSIS_OFF = "analysis_off"
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,5 +84,5 @@ class CommandIntent:
     command: CommandName
 
 
-MoveCommandIntent = MoveIntent | SanMoveIntent
+MoveCommandIntent = MoveIntent | SanMoveIntent | ContextualMoveIntent
 Intent = MoveCommandIntent | CommandIntent

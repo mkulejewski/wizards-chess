@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from io import StringIO
+from types import MappingProxyType
+
 import chess
 import chess.pgn
 
 from wizard_chess.domain.events import MoveExecuted
 from wizard_chess.domain.exceptions import (
+    GameTerminationError,
     InvalidFenError,
     InvalidMoveError,
+    InvalidPgnError,
     NoMoveToRedoError,
     NoMoveToUndoError,
 )
@@ -19,9 +25,19 @@ from wizard_chess.domain.results import GameResult, GameStatus, PlayerColor
 class ChessGame:
     """The authoritative digital twin of a chessboard position and its history."""
 
-    def __init__(self, fen: str | None = None) -> None:
+    _METADATA_FIELDS = ("Event", "Site", "Date", "Round", "White", "Black")
+
+    def __init__(
+        self,
+        fen: str | None = None,
+        *,
+        metadata: Mapping[str, str] | None = None,
+    ) -> None:
         self._board = chess.Board()
         self._redo_stack: list[chess.Move] = []
+        self._metadata = self._clean_metadata(metadata or {})
+        self._manual_status: GameStatus | None = None
+        self._manual_winner: PlayerColor | None = None
         if fen is not None:
             self.load_fen(fen)
 
@@ -48,6 +64,15 @@ class ChessGame:
     def can_redo(self) -> bool:
         """Whether an undone move remains available to redo."""
         return bool(self._redo_stack)
+
+    @property
+    def metadata(self) -> Mapping[str, str]:
+        """Return immutable portable game metadata."""
+        return MappingProxyType(dict(self._metadata))
+
+    def update_metadata(self, **values: str) -> None:
+        """Update recognized PGN headers without inventing unknown values."""
+        self._metadata.update(self._clean_metadata(values))
 
     def last_move(self) -> ChessMove | None:
         """Return the latest authoritative move, if its history is known."""
@@ -76,7 +101,7 @@ class ChessGame:
 
     def validate_move(self, move: ChessMove) -> None:
         """Raise a descriptive application error unless a move is currently legal."""
-        if self._board.is_game_over(claim_draw=False):
+        if self._manual_status is not None or self._board.is_game_over(claim_draw=False):
             raise InvalidMoveError("The game is already over")
         python_move = move.to_python_chess()
         if python_move in self._board.legal_moves:
@@ -90,6 +115,7 @@ class ChessGame:
             raise NoMoveToUndoError("There is no move to undo")
         move = self._board.pop()
         self._redo_stack.append(move)
+        self._clear_manual_termination()
         return ChessMove.from_python_chess(move)
 
     def redo(self) -> MoveExecuted:
@@ -118,6 +144,7 @@ class ChessGame:
             raise InvalidFenError(f"FEN describes an invalid position: {fen}")
         self._board = board
         self._redo_stack.clear()
+        self._clear_manual_termination()
 
     def is_check(self) -> bool:
         return self._board.is_check()
@@ -129,10 +156,24 @@ class ChessGame:
         return self._board.is_stalemate()
 
     def is_game_over(self) -> bool:
-        return self._board.is_game_over(claim_draw=False)
+        return self._manual_status is not None or self._board.is_game_over(claim_draw=False)
 
     def result(self) -> GameResult:
         """Return terminal status plus currently claimable draw conditions."""
+        if self._manual_status is not None:
+            notation = "1/2-1/2"
+            if self._manual_winner is PlayerColor.WHITE:
+                notation = "1-0"
+            elif self._manual_winner is PlayerColor.BLACK:
+                notation = "0-1"
+            return GameResult(
+                status=self._manual_status,
+                notation=notation,
+                winner=self._manual_winner,
+                can_claim_fifty_moves=False,
+                can_claim_threefold_repetition=False,
+            )
+
         outcome = self._board.outcome(claim_draw=False)
         winner: PlayerColor | None = None
         if outcome is not None and outcome.winner is not None:
@@ -166,8 +207,77 @@ class ChessGame:
     def to_pgn(self) -> str:
         """Render the current main line as portable game notation."""
         game = chess.pgn.Game.from_board(self._board)
+        for name, value in self._metadata.items():
+            game.headers[name] = value
+        game.headers["Result"] = self.result().notation
         exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
         return game.accept(exporter)
+
+    def load_pgn(self, pgn: str) -> None:
+        """Replace state with a validated PGN main line and preserve known metadata."""
+        try:
+            parsed = chess.pgn.read_game(StringIO(pgn))
+        except (ValueError, UnicodeError) as error:
+            raise InvalidPgnError("Invalid PGN") from error
+        if parsed is None:
+            raise InvalidPgnError("PGN does not contain a game")
+        if parsed.errors:
+            raise InvalidPgnError(f"Invalid PGN: {parsed.errors[0]}")
+
+        board = parsed.board()
+        try:
+            for move in parsed.mainline_moves():
+                if move not in board.legal_moves:
+                    raise InvalidPgnError(f"PGN contains illegal move: {move.uci()}")
+                board.push(move)
+        except (AssertionError, ValueError) as error:
+            raise InvalidPgnError("PGN contains an invalid main line") from error
+
+        self._board = board
+        self._redo_stack.clear()
+        self._metadata = self._clean_metadata(parsed.headers)
+        self._clear_manual_termination()
+        result = parsed.headers.get("Result", "*")
+        if not self._board.is_game_over(claim_draw=False):
+            if result == "1/2-1/2":
+                self._manual_status = GameStatus.AGREED_DRAW
+            elif result in {"1-0", "0-1"}:
+                self._manual_status = GameStatus.RESIGNED
+                self._manual_winner = PlayerColor.WHITE if result == "1-0" else PlayerColor.BLACK
+
+    def resign(self, color: PlayerColor | None = None) -> GameResult:
+        """End an ongoing game by resignation of ``color`` or the side to move."""
+        if self.is_game_over():
+            raise GameTerminationError("The game is already over")
+        resigned = color or self.turn
+        self._manual_status = GameStatus.RESIGNED
+        self._manual_winner = (
+            PlayerColor.BLACK if resigned is PlayerColor.WHITE else PlayerColor.WHITE
+        )
+        self._redo_stack.clear()
+        return self.result()
+
+    def agree_draw(self) -> GameResult:
+        """End an ongoing game by mutual draw agreement."""
+        if self.is_game_over():
+            raise GameTerminationError("The game is already over")
+        self._manual_status = GameStatus.AGREED_DRAW
+        self._manual_winner = None
+        self._redo_stack.clear()
+        return self.result()
+
+    def _clear_manual_termination(self) -> None:
+        self._manual_status = None
+        self._manual_winner = None
+
+    @classmethod
+    def _clean_metadata(cls, values: Mapping[str, str]) -> dict[str, str]:
+        return {
+            name: str(values[name]).strip()
+            for name in cls._METADATA_FIELDS
+            if name in values
+            and any(character not in "?.-/ " for character in str(values[name]).strip())
+        }
 
     def _event_for(self, move: chess.Move) -> MoveExecuted:
         is_en_passant = self._board.is_en_passant(move)

@@ -4,6 +4,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from wizard_chess.configuration import VoiceLanguage
+
 LOGGER = logging.getLogger(__name__)
 
 
@@ -12,7 +14,7 @@ class VoiceConfig:
     """Settings for local microphone capture and CPU speech recognition."""
 
     model: str = "base.en"
-    language: str = "en"
+    language: VoiceLanguage = VoiceLanguage.ENGLISH
     device: int | str | None = None
     sample_rate: int = 16_000
     maximum_seconds: float = 6.0
@@ -34,11 +36,20 @@ class VoiceConfig:
             except ValueError:
                 device = raw_device
 
+        raw_language = os.environ.get(
+            "WIZARD_CHESS_VOICE_LANGUAGE", defaults.language.value
+        ).strip()
+        try:
+            language = VoiceLanguage(raw_language)
+        except ValueError:
+            LOGGER.warning("Ignoring invalid WIZARD_CHESS_VOICE_LANGUAGE=%r", raw_language)
+            language = defaults.language
+        default_model = "base" if language is VoiceLanguage.POLISH else defaults.model
+
         return cls(
-            model=os.environ.get("WIZARD_CHESS_VOICE_MODEL", defaults.model).strip()
-            or defaults.model,
-            language=os.environ.get("WIZARD_CHESS_VOICE_LANGUAGE", defaults.language).strip()
-            or defaults.language,
+            model=os.environ.get("WIZARD_CHESS_VOICE_MODEL", default_model).strip()
+            or default_model,
+            language=language,
             device=device,
             maximum_seconds=_positive_float_from_environment(
                 "WIZARD_CHESS_VOICE_MAX_SECONDS", defaults.maximum_seconds

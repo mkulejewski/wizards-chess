@@ -1,30 +1,44 @@
 """Main PySide6 window for the playable Wizard Chess desktop interface."""
 
 from collections.abc import Callable
+from dataclasses import replace
 from typing import ClassVar, cast
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
+    QFileDialog,
+    QGroupBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from wizard_chess.application.session import GameSession, SessionResult
+from wizard_chess.configuration import VoiceLanguage
 from wizard_chess.domain.exceptions import WizardChessError
+from wizard_chess.domain.move import ChessMove
+from wizard_chess.engine.models import PositionAnalysis, evaluation_share
+from wizard_chess.gui.analysis_worker import GameAnalysisWorker, format_game_analysis
 from wizard_chess.gui.board_widget import ChessBoardWidget
+from wizard_chess.gui.engine_worker import EngineWorker
 from wizard_chess.gui.interaction import BoardInteraction, ClickResult
 from wizard_chess.gui.view_model import format_game_status, format_move_history
 from wizard_chess.gui.voice_worker import VoiceWorker
+from wizard_chess.persistence.pgn_store import PgnStore
+from wizard_chess.persistence.settings_store import SettingsStore
+from wizard_chess.speech.config import VoiceConfig
 from wizard_chess.speech.controller import VoiceController
 from wizard_chess.speech.exceptions import VoiceCommandRejected
 from wizard_chess.speech.factory import create_default_voice_controller
@@ -45,13 +59,22 @@ class MainWindow(QMainWindow):
         self,
         session: GameSession | None = None,
         voice_controller: VoiceController[SessionResult] | None = None,
+        settings_store: SettingsStore | None = None,
     ) -> None:
         super().__init__()
         self.session = session or GameSession()
+        self._owns_voice_controller = voice_controller is None
+        self._settings_store = settings_store
         self.voice_controller = voice_controller or create_default_voice_controller(
             self.session.play_text
         )
         self._voice_worker: VoiceWorker | None = None
+        self._engine_worker: EngineWorker | None = None
+        self._game_analysis_worker: GameAnalysisWorker | None = None
+        self._engine_failed = False
+        self._last_analysis_fen: str | None = None
+        self._closing = False
+        self._viewed_ply: int | None = None
         self.interaction = BoardInteraction(self.session)
         self.setWindowTitle("Wizard Chess")
         self.resize(1040, 760)
@@ -78,9 +101,40 @@ class MainWindow(QMainWindow):
         self.fen_input = QLineEdit()
         self.load_fen_button = QPushButton("Load FEN")
         self.copy_fen_button = QPushButton("Copy FEN")
+        self.import_pgn_button = QPushButton("Import PGN")
+        self.export_pgn_button = QPushButton("Export PGN")
+        self.engine_status_label = QLabel("Engine: Disabled")
+        self.engine_status_label.setWordWrap(True)
+        self.evaluation_bar = QProgressBar()
+        self.evaluation_bar.setRange(0, 1000)
+        self.evaluation_bar.setValue(500)
+        self.evaluation_bar.setFormat("Evaluation: —")
+        self.analysis_view = QPlainTextEdit()
+        self.analysis_view.setReadOnly(True)
+        self.analysis_view.setMaximumHeight(150)
+        self.analysis_view.setPlaceholderText("Candidate moves and principal variation")
+        self.analyse_game_button = QPushButton("Analyse game")
+        self.history_slider = QSlider(Qt.Orientation.Horizontal)
+        self.history_slider.setMinimum(0)
+        self.history_slider.setMaximum(0)
+        self.history_position_label = QLabel("Live position")
+        self.live_position_button = QPushButton("Return to live")
+        self.live_position_button.setEnabled(False)
+        self.clock_label = QLabel("Clocks disabled")
+        self.clock_button = QPushButton("Start clock")
+        self.reset_clock_button = QPushButton("Reset clock")
+        self.language_combo = QComboBox()
+        self.language_combo.addItem("English", VoiceLanguage.ENGLISH.value)
+        self.language_combo.addItem("Polski", VoiceLanguage.POLISH.value)
+        language_index = self.language_combo.findData(self.session.voice_language.value)
+        self.language_combo.setCurrentIndex(max(0, language_index))
 
         self._build_layout()
         self._connect_signals()
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(250)
+        self._clock_timer.timeout.connect(self._refresh_clock)
+        self._clock_timer.start()
         self.refresh()
 
     @property
@@ -88,23 +142,54 @@ class MainWindow(QMainWindow):
         """Return whether the GUI currently owns a running voice worker."""
         return self._voice_worker is not None
 
+    @property
+    def game_analysis_active(self) -> bool:
+        """Return whether post-game analysis is running in the background."""
+        return self._game_analysis_worker is not None
+
     def refresh(self) -> None:
         """Rerender every stateful view from the authoritative session."""
-        snapshot = self.session.snapshot()
+        live_snapshot = self.session.snapshot()
+        snapshot = (
+            self.session.snapshot_at(self._viewed_ply)
+            if self._viewed_ply is not None
+            else live_snapshot
+        )
         self.board_widget.render_position(
             snapshot,
             self.interaction.selected_square,
             self.interaction.legal_destinations,
             self.interaction.orientation,
         )
-        self.history_view.setPlainText(format_move_history(snapshot.move_history))
-        self.status_label.setText(format_game_status(snapshot))
+        self.history_view.setPlainText(format_move_history(live_snapshot.move_history))
+        self.status_label.setText(
+            f"Viewing position after ply {self._viewed_ply}"
+            if self._viewed_ply is not None
+            else format_game_status(live_snapshot)
+        )
         self.fen_input.setText(snapshot.fen)
-        self.undo_button.setEnabled(snapshot.can_undo)
-        self.redo_button.setEnabled(snapshot.can_redo)
-        self.command_input.setEnabled(not snapshot.result.is_over)
-        self.play_button.setEnabled(not snapshot.result.is_over)
-        self.voice_button.setEnabled(not snapshot.result.is_over and not self.voice_active)
+        self.undo_button.setEnabled(live_snapshot.can_undo)
+        self.redo_button.setEnabled(live_snapshot.can_redo)
+        live_input_enabled = self._viewed_ply is None and not live_snapshot.result.is_over
+        self.board_widget.setEnabled(self._viewed_ply is None)
+        self.command_input.setEnabled(live_input_enabled)
+        self.play_button.setEnabled(live_input_enabled)
+        self.voice_button.setEnabled(live_input_enabled and not self.voice_active)
+        move_count = len(live_snapshot.move_history)
+        self.history_slider.blockSignals(True)
+        self.history_slider.setMaximum(move_count)
+        self.history_slider.setValue(
+            self._viewed_ply if self._viewed_ply is not None else move_count
+        )
+        self.history_slider.blockSignals(False)
+        self.history_position_label.setText(
+            f"After ply {self._viewed_ply} of {move_count}"
+            if self._viewed_ply is not None
+            else f"Live position · {move_count} plies"
+        )
+        self.live_position_button.setEnabled(self._viewed_ply is not None)
+        self._refresh_clock()
+        self._request_engine_work(live_snapshot.fen)
 
     def _build_layout(self) -> None:
         central = QWidget()
@@ -124,12 +209,42 @@ class MainWindow(QMainWindow):
         history_title.setStyleSheet("font-size: 16px; font-weight: 600;")
         side_layout.addWidget(history_title)
         side_layout.addWidget(self.history_view, 1)
+        side_layout.addWidget(self.history_position_label)
+        history_navigation = QHBoxLayout()
+        history_navigation.addWidget(self.history_slider, 1)
+        history_navigation.addWidget(self.live_position_button)
+        side_layout.addLayout(history_navigation)
         side_layout.addWidget(QLabel("Position (FEN)"))
         side_layout.addWidget(self.fen_input)
         fen_actions = QHBoxLayout()
         fen_actions.addWidget(self.load_fen_button)
         fen_actions.addWidget(self.copy_fen_button)
         side_layout.addLayout(fen_actions)
+        pgn_actions = QHBoxLayout()
+        pgn_actions.addWidget(self.import_pgn_button)
+        pgn_actions.addWidget(self.export_pgn_button)
+        side_layout.addLayout(pgn_actions)
+
+        engine_group = QGroupBox("Engine analysis")
+        engine_layout = QVBoxLayout(engine_group)
+        engine_layout.addWidget(self.engine_status_label)
+        engine_layout.addWidget(self.evaluation_bar)
+        engine_layout.addWidget(self.analysis_view)
+        engine_layout.addWidget(self.analyse_game_button)
+        side_layout.addWidget(engine_group)
+
+        settings_group = QGroupBox("Play settings")
+        settings_layout = QVBoxLayout(settings_group)
+        language_row = QHBoxLayout()
+        language_row.addWidget(QLabel("Voice language:"))
+        language_row.addWidget(self.language_combo)
+        settings_layout.addLayout(language_row)
+        settings_layout.addWidget(self.clock_label)
+        clock_actions = QHBoxLayout()
+        clock_actions.addWidget(self.clock_button)
+        clock_actions.addWidget(self.reset_clock_button)
+        settings_layout.addLayout(clock_actions)
+        side_layout.addWidget(settings_group)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.board_widget)
@@ -164,6 +279,14 @@ class MainWindow(QMainWindow):
         self.flip_button.clicked.connect(self._flip)
         self.load_fen_button.clicked.connect(self._load_fen)
         self.copy_fen_button.clicked.connect(self._copy_fen)
+        self.import_pgn_button.clicked.connect(self._import_pgn)
+        self.export_pgn_button.clicked.connect(self._export_pgn)
+        self.clock_button.clicked.connect(self._toggle_clock)
+        self.reset_clock_button.clicked.connect(self._reset_clock)
+        self.language_combo.currentIndexChanged.connect(self._change_language)
+        self.history_slider.valueChanged.connect(self._view_history_position)
+        self.live_position_button.clicked.connect(self._return_to_live_position)
+        self.analyse_game_button.clicked.connect(self._start_game_analysis)
 
     def _on_board_square(self, square: str) -> None:
         try:
@@ -171,6 +294,7 @@ class MainWindow(QMainWindow):
             if result.promotion_choices:
                 result = self._choose_promotion(square, result)
             if result.move_event is not None:
+                self._viewed_ply = None
                 self._show_feedback(f"Played: {result.move_event.san}", error=False)
         except WizardChessError as error:
             self._show_feedback(str(error))
@@ -202,6 +326,7 @@ class MainWindow(QMainWindow):
                 self.close()
                 return
             self.command_input.clear()
+            self._viewed_ply = None
             self.interaction.clear_selection()
             self._show_feedback(result.message or "Done.", error=False)
         except WizardChessError as error:
@@ -246,6 +371,7 @@ class MainWindow(QMainWindow):
             f'Voice: Success\nHeard: "{recognition.transcript}"\n{detail}'
         )
         self.interaction.clear_selection()
+        self._viewed_ply = None
         self._show_feedback(detail, error=False)
         if session_result.quit_requested:
             self.close()
@@ -285,10 +411,19 @@ class MainWindow(QMainWindow):
         self.fen_input.setEnabled(enabled)
         self.load_fen_button.setEnabled(enabled)
         self.copy_fen_button.setEnabled(enabled)
+        self.import_pgn_button.setEnabled(enabled)
+        self.export_pgn_button.setEnabled(enabled)
+        self.clock_button.setEnabled(enabled and self.session.settings.clock.enabled)
+        self.reset_clock_button.setEnabled(enabled and self.session.settings.clock.enabled)
+        self.language_combo.setEnabled(enabled)
+        self.history_slider.setEnabled(enabled)
+        self.live_position_button.setEnabled(enabled and self._viewed_ply is not None)
+        self.analyse_game_button.setEnabled(enabled)
         self.voice_button.setEnabled(enabled)
 
     def _new_game(self) -> None:
         self.session.new_game()
+        self._viewed_ply = None
         self.interaction.clear_selection()
         self._show_feedback("Started a new game.", error=False)
         self.refresh()
@@ -306,6 +441,7 @@ class MainWindow(QMainWindow):
     def _perform_state_action(self, action: Callable[[], str]) -> None:
         try:
             message = action()
+            self._viewed_ply = None
             self.interaction.clear_selection()
             self._show_feedback(message, error=False)
         except WizardChessError as error:
@@ -323,6 +459,7 @@ class MainWindow(QMainWindow):
     def _load_fen(self) -> None:
         try:
             self.session.load_fen(self.fen_input.text())
+            self._viewed_ply = None
             self.interaction.clear_selection()
             self._show_feedback("FEN loaded.", error=False)
         except WizardChessError as error:
@@ -333,13 +470,246 @@ class MainWindow(QMainWindow):
         QApplication.clipboard().setText(self.session.snapshot().fen)
         self._show_feedback("FEN copied.", error=False)
 
+    def _import_pgn(self) -> None:
+        source, _selected_filter = QFileDialog.getOpenFileName(
+            self, "Import PGN", "", "Chess games (*.pgn);;All files (*)"
+        )
+        if not source:
+            return
+        try:
+            self.session.load_pgn(PgnStore().load(source))
+            self._viewed_ply = None
+            self.interaction.clear_selection()
+            self._show_feedback("PGN imported.", error=False)
+        except (OSError, WizardChessError) as error:
+            self._show_feedback(str(error))
+        self.refresh()
+
+    def _export_pgn(self) -> None:
+        destination, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Export PGN", "wizard-chess.pgn", "Chess games (*.pgn)"
+        )
+        if not destination:
+            return
+        try:
+            path = self.session.save_game(destination)
+            self._show_feedback(f"PGN exported: {path}", error=False)
+        except OSError as error:
+            self._show_feedback(str(error))
+
+    def _toggle_clock(self) -> None:
+        snapshot = self.session.snapshot().clock
+        if snapshot is not None and snapshot.running:
+            self.session.pause_clock()
+        else:
+            self.session.start_clock()
+        self._refresh_clock()
+
+    def _reset_clock(self) -> None:
+        self.session.reset_clock()
+        self._refresh_clock()
+
+    def _refresh_clock(self) -> None:
+        snapshot = self.session.snapshot().clock
+        if snapshot is None:
+            self.clock_label.setText("Clocks disabled")
+            self.clock_button.setEnabled(False)
+            self.reset_clock_button.setEnabled(False)
+            return
+        self.clock_label.setText(
+            f"White {_format_clock(snapshot.white_seconds)}  ·  "
+            f"Black {_format_clock(snapshot.black_seconds)}"
+        )
+        self.clock_button.setText("Pause clock" if snapshot.running else "Start clock")
+        self.clock_button.setEnabled(True)
+        self.reset_clock_button.setEnabled(True)
+
+    def _change_language(self, index: int) -> None:
+        raw_language = self.language_combo.itemData(index)
+        if not isinstance(raw_language, str):
+            return
+        language = VoiceLanguage(raw_language)
+        self.session.set_voice_language(language)
+        if self._settings_store is not None:
+            try:
+                self._settings_store.save(self.session.settings)
+            except OSError:
+                self._show_feedback("Voice language changed, but preferences could not be saved.")
+        if self._owns_voice_controller:
+            config = replace(VoiceConfig.from_environment(), language=language)
+            self.voice_controller = create_default_voice_controller(
+                self.session.play_text,
+                config,
+            )
+        self._show_feedback(
+            (
+                "Voice language: Polski"
+                if language is VoiceLanguage.POLISH
+                else "Voice language: English"
+            ),
+            error=False,
+        )
+
+    def _view_history_position(self, ply: int) -> None:
+        live_ply = len(self.session.snapshot().move_history)
+        self._viewed_ply = None if ply == live_ply else ply
+        self.interaction.clear_selection()
+        self.refresh()
+
+    def _return_to_live_position(self) -> None:
+        self._viewed_ply = None
+        self.interaction.clear_selection()
+        self.refresh()
+
+    def _start_game_analysis(self) -> None:
+        engine = self.session.engine
+        if engine is None or self._engine_failed:
+            self._show_feedback("Configure Stockfish before analysing a game.")
+            return
+        if self._engine_worker is not None or self._game_analysis_worker is not None:
+            self._show_feedback("The engine is already busy.")
+            return
+        worker = GameAnalysisWorker(engine, self.session.snapshot().pgn)
+        self._game_analysis_worker = worker
+        worker.progress.connect(self._on_game_analysis_progress)
+        worker.succeeded.connect(self._on_game_analysis_success)
+        worker.failed.connect(self._on_game_analysis_failure)
+        worker.finished.connect(self._on_game_analysis_finished)
+        worker.finished.connect(worker.deleteLater)
+        self._set_interaction_enabled(False)
+        self.engine_status_label.setText("Engine: Analysing game…")
+        worker.start()
+
+    def _on_game_analysis_progress(self, completed: int, total: int) -> None:
+        self.engine_status_label.setText(f"Engine: Analysing game {completed}/{total}")
+
+    def _on_game_analysis_success(self, result: object) -> None:
+        from wizard_chess.analysis.models import GameAnalysis
+
+        if isinstance(result, GameAnalysis):
+            self.engine_status_label.setText("Engine: Game analysis complete")
+            self.analysis_view.setPlainText(format_game_analysis(result))
+
+    def _on_game_analysis_failure(self, error: object) -> None:
+        self.engine_status_label.setText(f"Game analysis failed: {error}")
+
+    def _on_game_analysis_finished(self) -> None:
+        self._game_analysis_worker = None
+        self._set_interaction_enabled(True)
+        self.refresh()
+
+    def _request_engine_work(self, fen: str) -> None:
+        engine = self.session.engine
+        if self._closing or engine is None or self._engine_failed:
+            if engine is None:
+                self.engine_status_label.setText("Engine: Disabled (ordinary play is available)")
+            return
+        if self._engine_worker is not None:
+            if self._engine_worker.fen != fen:
+                self._engine_worker.cancel()
+            return
+
+        mode: str | None = None
+        if self.session.engine_controls_turn() and not self.session.game.is_game_over():
+            mode = "move"
+        elif self.session.analysis_enabled and self._last_analysis_fen != fen:
+            mode = "analysis"
+        if mode is None:
+            return
+
+        worker = EngineWorker(engine, self.session.game.board, mode)
+        self._engine_worker = worker
+        worker.succeeded.connect(self._on_engine_success)
+        worker.failed.connect(self._on_engine_failure)
+        worker.finished.connect(self._on_engine_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.engine_status_label.setText(
+            "Engine: Thinking…" if mode == "move" else "Engine: Analysing…"
+        )
+        if mode == "move":
+            self._set_interaction_enabled(False)
+        worker.start()
+
+    def _on_engine_success(self, fen: str, mode: str, result: object) -> None:
+        if fen != self.session.snapshot().fen:
+            return
+        if mode == "move":
+            if isinstance(result, ChessMove):
+                try:
+                    event = self.session.play_move(result)
+                    self._viewed_ply = None
+                    self.interaction.clear_selection()
+                    self._show_feedback(f"Engine played: {event.san}", error=False)
+                except WizardChessError as error:
+                    self._show_feedback(str(error))
+            return
+        if isinstance(result, PositionAnalysis):
+            self._last_analysis_fen = fen
+            self._render_engine_analysis(result)
+
+    def _on_engine_failure(self, fen: str, mode: str, error: object) -> None:
+        del fen, mode
+        self._engine_failed = True
+        self.engine_status_label.setText(
+            f"Engine unavailable: {error}. Ordinary chess remains available."
+        )
+        self.evaluation_bar.setFormat("Evaluation: unavailable")
+
+    def _on_engine_finished(self) -> None:
+        self._engine_worker = None
+        self._set_interaction_enabled(True)
+        self.refresh()
+
+    def _render_engine_analysis(self, analysis: PositionAnalysis) -> None:
+        best = analysis.best_line
+        if best is None:
+            self.engine_status_label.setText(
+                "Engine: Terminal position" if analysis.terminal else "Engine: No line"
+            )
+            self.analysis_view.clear()
+            return
+        self.engine_status_label.setText("Engine: Ready")
+        self.evaluation_bar.setValue(round(evaluation_share(best.evaluation) * 1000))
+        self.evaluation_bar.setFormat(f"Evaluation: {best.evaluation.display()}")
+        board = self.session.game.board
+        rows: list[str] = []
+        for index, line in enumerate(analysis.lines, start=1):
+            move = line.move.to_python_chess()
+            san = board.san(move) if move in board.legal_moves else line.move.uci()
+            rows.append(f"{index}. {san}  {line.evaluation.display()}")
+        pv_board = board.copy(stack=False)
+        pv_san: list[str] = []
+        for move_value in best.principal_variation:
+            move = move_value.to_python_chess()
+            if move not in pv_board.legal_moves:
+                break
+            pv_san.append(pv_board.san(move))
+            pv_board.push(move)
+        if pv_san:
+            rows.extend(("", f"PV: {' '.join(pv_san)}"))
+        self.analysis_view.setPlainText("\n".join(rows))
+
     def _show_feedback(self, message: str, *, error: bool = True) -> None:
         color = "#8b3a2b" if error else "#386641"
         self.feedback_label.setStyleSheet(f"color: {color};")
         self.feedback_label.setText(message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        self._closing = True
         if self._voice_worker is not None and self._voice_worker.isRunning():
             self._voice_worker.cancel()
             self._voice_worker.wait()
+        if self._engine_worker is not None and self._engine_worker.isRunning():
+            self._engine_worker.cancel()
+            self._engine_worker.wait()
+        if self._game_analysis_worker is not None and self._game_analysis_worker.isRunning():
+            self._game_analysis_worker.cancel()
+            self._game_analysis_worker.wait()
+        self.session.close()
         event.accept()
+
+
+def _format_clock(seconds: float) -> str:
+    total = max(0, round(seconds))
+    minutes, remainder = divmod(total, 60)
+    return f"{minutes:02d}:{remainder:02d}"

@@ -46,7 +46,7 @@ class FasterWhisperRecognizer:
         self,
         model: str = "base.en",
         *,
-        language: str = "en",
+        language: str | None = "en",
         device: str = "cpu",
         compute_type: str = "int8",
     ) -> None:
@@ -68,17 +68,26 @@ class FasterWhisperRecognizer:
         model = self._get_model()
         samples = self._as_float32_array(recording.samples)
         try:
-            segments, _information = model.transcribe(
-                samples,
-                language=self.language,
-                beam_size=5,
-                vad_filter=True,
-                vad_parameters={"min_silence_duration_ms": 500},
-                condition_on_previous_text=False,
-                initial_prompt=(
+            prompt = (
+                "Ruchy szachowe: e4, e5, skoczek f3, goniec c4, roszada krótka."
+                if self.language == "pl"
+                else (
                     "Chess moves: e4, e5, knight f3, bishop c4, queen takes d5, "
                     "castle kingside, castle queenside."
-                ),
+                )
+            )
+            options: dict[str, object] = {
+                "beam_size": 5,
+                "vad_filter": True,
+                "vad_parameters": {"min_silence_duration_ms": 500},
+                "condition_on_previous_text": False,
+                "initial_prompt": prompt,
+            }
+            if self.language is not None:
+                options["language"] = self.language
+            segments, _information = model.transcribe(
+                samples,
+                **options,
             )
             text = " ".join(segment.text.strip() for segment in segments if segment.text.strip())
         except Exception as error:

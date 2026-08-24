@@ -40,7 +40,7 @@ testpaths = ["tests"]
 target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
-extend-exclude = ["AGENT_INSTRUCTION_1.md"]
+extend-exclude = ["AGENT_INSTRUCTION*.md", "AGENT_INSTRUCTIONS*.md", "AGENTS.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

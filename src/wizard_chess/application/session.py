@@ -1,18 +1,28 @@
-"""Reusable application session shared by CLI, GUI, and future input adapters."""
+"""Reusable application session shared by every input and output adapter."""
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, replace
+from pathlib import Path
 
 import chess
 
-from wizard_chess.commands.intents import CommandIntent, CommandName, MoveIntent, SanMoveIntent
-from wizard_chess.commands.parser import CommandParser
+from wizard_chess.application.clock import ChessClock, ClockSnapshot
+from wizard_chess.commands.intents import CommandIntent, CommandName, MoveCommandIntent
+from wizard_chess.commands.language import LanguageCommandParser
 from wizard_chess.commands.resolver import MoveResolver
+from wizard_chess.configuration import ApplicationSettings, PlayerKind, VoiceLanguage
 from wizard_chess.domain.events import MoveExecuted
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.domain.results import GameResult, PlayerColor
+from wizard_chess.engine.base import ChessEngine
+from wizard_chess.engine.factory import create_stockfish_engine
 from wizard_chess.hardware.base import PhysicalBoard
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
+from wizard_chess.localization import translate
+from wizard_chess.persistence.game_store import GameStore
+
+LOGGER = logging.getLogger(__name__)
 
 HELP_TEXT = """Moves (SAN):
   e4 | Nf3 | exd5 | O-O | e8=Q
@@ -20,7 +30,7 @@ Coordinate forms:
   e2 e4 | e2-e4 | e2 to e4 | move e2 to e4
   e7 e8 queen (promotion: queen, rook, bishop, knight, or q/r/b/n)
 Commands:
-  undo, redo, fen, pgn, new, legal, help, quit
+  undo, redo, fen, pgn, new game, resign, draw, save, repeat, legal, help, quit
 Voice input (terminal):
   voice"""
 
@@ -39,6 +49,8 @@ class PositionSnapshot:
     pgn: str
     can_undo: bool
     can_redo: bool
+    clock: ClockSnapshot | None = None
+    viewed_ply: int | None = None
 
     def piece_at(self, square: str) -> str | None:
         """Return a FEN piece symbol at a square, if occupied."""
@@ -57,22 +69,80 @@ class SessionResult:
 class GameSession:
     """Coordinate commands, direct moves, state changes, and output events."""
 
-    def __init__(self, physical_board: PhysicalBoard | None = None) -> None:
+    def __init__(
+        self,
+        physical_board: PhysicalBoard | None = None,
+        *,
+        settings: ApplicationSettings | None = None,
+        engine: ChessEngine | None = None,
+        game_store: GameStore | None = None,
+        clock: ChessClock | None = None,
+    ) -> None:
+        self.settings = settings or ApplicationSettings.from_environment()
         self._physical_board = (
             physical_board if physical_board is not None else SimulatedPhysicalBoard()
         )
-        self._parser = CommandParser()
+        self._parser = LanguageCommandParser(self.settings.voice_language)
         self._resolver = MoveResolver()
-        self._game = ChessGame()
+        self._game = self._new_configured_game()
+        self._engine = engine or create_stockfish_engine(self.settings.engine)
+        self._game_store = game_store
+        self._clock = clock or ChessClock(self.settings.clock)
+        self._analysis_enabled = self.settings.engine.analysis_enabled
+        self._last_feedback: str | None = None
 
     @property
     def game(self) -> ChessGame:
         """Expose the authoritative game for compatibility and composition."""
         return self._game
 
+    @property
+    def engine(self) -> ChessEngine | None:
+        return self._engine
+
+    @property
+    def analysis_enabled(self) -> bool:
+        return self._analysis_enabled
+
+    @property
+    def voice_language(self) -> VoiceLanguage:
+        return self._parser.language
+
+    def set_voice_language(self, language: VoiceLanguage) -> None:
+        """Switch the language grammar used by subsequent voice/text submissions."""
+        self._parser = LanguageCommandParser(language)
+        self.settings = replace(self.settings, voice_language=language)
+
     def snapshot(self) -> PositionSnapshot:
         """Return all current read-only data needed by presentation adapters."""
+        return self._snapshot_for_game(self._game)
+
+    def snapshot_at(self, ply: int) -> PositionSnapshot:
+        """Inspect an earlier position without changing the authoritative live game."""
         board = self._game.board
+        if not 0 <= ply <= len(board.move_stack):
+            raise ValueError(f"History ply is out of range: {ply}")
+        replay = ChessGame(board.root().fen(), metadata=self._game.metadata)
+        for move in board.move_stack[:ply]:
+            replay.make_move(ChessMove.from_python_chess(move))
+        snapshot = self._snapshot_for_game(replay)
+        return PositionSnapshot(
+            pieces=snapshot.pieces,
+            legal_moves=snapshot.legal_moves,
+            move_history=snapshot.move_history,
+            last_move=snapshot.last_move,
+            turn=snapshot.turn,
+            result=snapshot.result,
+            fen=snapshot.fen,
+            pgn=snapshot.pgn,
+            can_undo=snapshot.can_undo,
+            can_redo=snapshot.can_redo,
+            clock=None,
+            viewed_ply=ply,
+        )
+
+    def _snapshot_for_game(self, game: ChessGame) -> PositionSnapshot:
+        board = game.board
         pieces = tuple(
             sorted(
                 (chess.square_name(square), piece.symbol())
@@ -81,49 +151,127 @@ class GameSession:
         )
         return PositionSnapshot(
             pieces=pieces,
-            legal_moves=self._game.legal_moves(),
-            move_history=self._game.move_history(),
-            last_move=self._game.last_move(),
-            turn=self._game.turn,
-            result=self._game.result(),
-            fen=self._game.fen(),
-            pgn=self._game.to_pgn(),
-            can_undo=self._game.can_undo,
-            can_redo=self._game.can_redo,
+            legal_moves=game.legal_moves(),
+            move_history=game.move_history(),
+            last_move=game.last_move(),
+            turn=game.turn,
+            result=game.result(),
+            fen=game.fen(),
+            pgn=game.to_pgn(),
+            can_undo=game.can_undo,
+            can_redo=game.can_redo,
+            clock=(
+                self._clock.snapshot()
+                if game is self._game and self.settings.clock.enabled
+                else None
+            ),
         )
 
     def play_text(self, text: str) -> SessionResult:
         """Interpret text and execute it through the authoritative application path."""
         intent = self._parser.parse(text)
-        if isinstance(intent, (MoveIntent, SanMoveIntent)):
+        if isinstance(intent, MoveCommandIntent):
             move = self._resolver.resolve(intent, self._game)
             event = self.play_move(move)
-            return SessionResult(message=f"Played: {event.san}", move_event=event)
-        return self._execute_command(intent)
+            result = SessionResult(
+                message=translate("session.played", self.voice_language, san=event.san),
+                move_event=event,
+            )
+        else:
+            result = self._execute_command(intent)
+        is_repeat = isinstance(intent, CommandIntent) and intent.command is CommandName.REPEAT
+        if result.message is not None and not is_repeat:
+            self._last_feedback = result.message
+        return result
 
     def play_move(self, move: ChessMove) -> MoveExecuted:
         """Execute one direct/click move and emit the normal physical-board event."""
         event = self._game.make_move(move)
         self._physical_board.execute_move(event)
+        self._clock.switch(self._game.turn)
+        self._autosave()
+        LOGGER.info("Move executed: %s", event.uci)
         return event
 
     def undo(self) -> ChessMove:
         """Undo through the authoritative domain history."""
-        return self._game.undo()
+        move = self._game.undo()
+        self._clock.set_active(self._game.turn)
+        self._autosave()
+        return move
 
     def redo(self) -> MoveExecuted:
         """Redo and emit the same event as any accepted move."""
         event = self._game.redo()
         self._physical_board.execute_move(event)
+        self._clock.set_active(self._game.turn)
+        self._autosave()
         return event
 
     def new_game(self) -> None:
         """Replace the authoritative game with a fresh starting position."""
-        self._game = ChessGame()
+        self._game = self._new_configured_game()
+        self._clock.reset(self._game.turn)
+        self._last_feedback = None
+        self._autosave()
+        LOGGER.info("New game")
 
     def load_fen(self, fen: str) -> None:
         """Load a validated position and clear its unavailable history."""
         self._game.load_fen(fen)
+        self._clock.reset(self._game.turn)
+        self._autosave()
+
+    def load_pgn(self, pgn: str) -> None:
+        """Load one validated main-line game without bypassing domain rules."""
+        replacement = ChessGame()
+        replacement.load_pgn(pgn)
+        self._game = replacement
+        self._clock.reset(self._game.turn)
+        self._autosave()
+
+    def save_game(self, destination: str | Path | None = None) -> Path:
+        """Save PGN to an explicit path or a unique local game-store path."""
+        if destination is not None:
+            from wizard_chess.persistence.pgn_store import PgnStore
+
+            path = PgnStore().save(self._game.to_pgn(), destination)
+        else:
+            store = self._game_store or GameStore(Path.cwd() / "saved-games")
+            path = store.save(self._game.to_pgn())
+        LOGGER.info("Game saved: %s", path.name)
+        return path
+
+    def play_engine_move(self) -> MoveExecuted | None:
+        """Request and centrally commit an engine move for the current position."""
+        if self._engine is None or self._game.is_game_over():
+            return None
+        move = self._engine.play_move(self._game.board)
+        return self.play_move(move) if move is not None else None
+
+    def engine_controls_turn(self) -> bool:
+        players = self.settings.players
+        kind = players.white_kind if self._game.turn.value == "white" else players.black_kind
+        return kind is PlayerKind.ENGINE
+
+    def start_clock(self) -> None:
+        """Start or resume the optional clock for the authoritative side to move."""
+        self._clock.start(self._game.turn)
+
+    def pause_clock(self) -> None:
+        """Pause the optional clock after accounting for monotonic elapsed time."""
+        self._clock.pause()
+
+    def reset_clock(self) -> None:
+        """Reset both clocks without changing the chess position."""
+        self._clock.reset(self._game.turn)
+
+    def close(self) -> None:
+        """Close optional owned services at application shutdown."""
+        self._clock.pause()
+        self._autosave()
+        if self._engine is not None:
+            self._engine.close()
 
     def _execute_command(self, intent: CommandIntent) -> SessionResult:
         command = intent.command
@@ -139,9 +287,62 @@ class GameSession:
             return SessionResult(message=" ".join(move.uci() for move in self._game.legal_moves()))
         if command is CommandName.NEW:
             self.new_game()
-            return SessionResult(message="Started a new game.")
+            return SessionResult(message=translate("session.new_game", self.voice_language))
         if command is CommandName.UNDO:
             move = self.undo()
-            return SessionResult(message=f"Undid: {move.uci()}")
-        event = self.redo()
-        return SessionResult(message=f"Redid: {event.san}", move_event=event)
+            return SessionResult(
+                message=translate("session.undo", self.voice_language, move=move.uci())
+            )
+        if command is CommandName.REDO:
+            event = self.redo()
+            return SessionResult(
+                message=translate("session.redo", self.voice_language, san=event.san),
+                move_event=event,
+            )
+        if command is CommandName.RESIGN:
+            result = self._game.resign()
+            self._clock.pause()
+            self._autosave()
+            winner = result.winner.value.title() if result.winner is not None else "Unknown"
+            return SessionResult(
+                message=translate("session.resigned", self.voice_language, winner=winner)
+            )
+        if command is CommandName.DRAW:
+            self._game.agree_draw()
+            self._clock.pause()
+            self._autosave()
+            return SessionResult(message=translate("session.draw", self.voice_language))
+        if command is CommandName.SAVE:
+            return SessionResult(
+                message=translate(
+                    "session.saved",
+                    self.voice_language,
+                    path=self.save_game(),
+                )
+            )
+        if command is CommandName.REPEAT:
+            return SessionResult(
+                message=self._last_feedback
+                or translate("session.nothing_to_repeat", self.voice_language)
+            )
+        if command is CommandName.ANALYSIS_ON:
+            self._analysis_enabled = True
+            return SessionResult(message=translate("session.analysis_enabled", self.voice_language))
+        self._analysis_enabled = False
+        return SessionResult(message=translate("session.analysis_disabled", self.voice_language))
+
+    def _autosave(self) -> None:
+        if not self.settings.autosave or self._game_store is None:
+            return
+        try:
+            self._game_store.autosave(self._game.to_pgn())
+        except OSError:
+            LOGGER.warning("Game autosave failed", exc_info=True)
+
+    def _new_configured_game(self) -> ChessGame:
+        return ChessGame(
+            metadata={
+                "White": self.settings.players.white_name,
+                "Black": self.settings.players.black_name,
+            }
+        )

@@ -3,6 +3,7 @@
 import logging
 from collections.abc import Callable
 from threading import Event, Lock
+from typing import Protocol
 
 from wizard_chess.speech.base import AudioInput, SpeechRecognizer
 from wizard_chess.speech.exceptions import (
@@ -23,6 +24,13 @@ from wizard_chess.speech.models import (
 )
 from wizard_chess.speech.normalizer import TranscriptNormalizer
 
+
+class TranscriptNormalization(Protocol):
+    """Language-specific deterministic cleanup contract."""
+
+    def normalize(self, transcript: str) -> str: ...
+
+
 StateCallback = Callable[[VoiceState], None]
 
 LOGGER = logging.getLogger(__name__)
@@ -36,7 +44,7 @@ class VoiceController[CommandResultT]:
         audio_input: AudioInput,
         recognizer: SpeechRecognizer,
         submit_command: Callable[[str], CommandResultT],
-        normalizer: TranscriptNormalizer | None = None,
+        normalizer: TranscriptNormalization | None = None,
     ) -> None:
         self._audio_input = audio_input
         self._recognizer = recognizer

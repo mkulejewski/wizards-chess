@@ -1,0 +1,8 @@
+# Scholar's mate: replay with `uv run wizard-chess --script examples/game.txt`.
+e4
+e5
+Bc4
+Nc6
+Qh5
+Nf6
+Qxf7#

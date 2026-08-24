@@ -2,7 +2,14 @@
 
 import chess
 
-from wizard_chess.commands.intents import MoveCommandIntent, SanMoveIntent
+from wizard_chess.commands.intents import (
+    CastleSide,
+    CheckClaim,
+    ContextualMoveIntent,
+    MoveCommandIntent,
+    PieceName,
+    SanMoveIntent,
+)
 from wizard_chess.domain.exceptions import (
     AmbiguousMoveError,
     InvalidMoveError,
@@ -17,6 +24,8 @@ class MoveResolver:
     def resolve(self, intent: MoveCommandIntent, game: ChessGame) -> ChessMove:
         if isinstance(intent, SanMoveIntent):
             return self._resolve_san(intent, game)
+        if isinstance(intent, ContextualMoveIntent):
+            return self._resolve_contextual(intent, game)
 
         attempted_move = ChessMove(intent.source, intent.target, intent.promotion)
         candidates = [
@@ -50,3 +59,60 @@ class MoveResolver:
             raise InvalidMoveError(f"Invalid SAN for current position: {intent.notation}")
 
         return ChessMove.from_python_chess(python_move)
+
+    def _resolve_contextual(self, intent: ContextualMoveIntent, game: ChessGame) -> ChessMove:
+        board = game.board
+        piece_type = _PIECE_TYPES.get(intent.piece) if intent.piece is not None else None
+        candidates: list[chess.Move] = []
+        for move in board.legal_moves:
+            moving_piece = board.piece_at(move.from_square)
+            if moving_piece is None:
+                continue
+            if piece_type is not None and moving_piece.piece_type != piece_type:
+                continue
+            if intent.origin is not None and chess.square_name(move.from_square) != intent.origin:
+                continue
+            if (
+                intent.destination is not None
+                and chess.square_name(move.to_square) != intent.destination
+            ):
+                continue
+            if intent.capture is not None and board.is_capture(move) is not intent.capture:
+                continue
+            promotion = chess.piece_symbol(move.promotion) if move.promotion is not None else None
+            if intent.promotion is not None and promotion != intent.promotion:
+                continue
+            if intent.promotion is None and move.promotion is not None:
+                continue
+            if intent.castle is not None:
+                if not board.is_castling(move):
+                    continue
+                kingside = chess.square_file(move.to_square) > chess.square_file(move.from_square)
+                if (intent.castle is CastleSide.KINGSIDE) is not kingside:
+                    continue
+            if intent.check_claim is not None:
+                san = board.san(move)
+                if intent.check_claim is CheckClaim.CHECKMATE and not san.endswith("#"):
+                    continue
+                if intent.check_claim is CheckClaim.CHECK and not san.endswith(("+", "#")):
+                    continue
+            candidates.append(move)
+
+        if not candidates:
+            detail = intent.destination or intent.castle or "requested action"
+            raise InvalidMoveError(f"No legal move matches {detail}")
+        if len(candidates) > 1:
+            piece = intent.piece.value if intent.piece is not None else "piece"
+            origins = ", ".join(chess.square_name(move.from_square) for move in candidates)
+            raise AmbiguousMoveError(f"Which {piece}? Legal origins: {origins}")
+        return ChessMove.from_python_chess(candidates[0])
+
+
+_PIECE_TYPES: dict[PieceName, chess.PieceType] = {
+    PieceName.PAWN: chess.PAWN,
+    PieceName.KNIGHT: chess.KNIGHT,
+    PieceName.BISHOP: chess.BISHOP,
+    PieceName.ROOK: chess.ROOK,
+    PieceName.QUEEN: chess.QUEEN,
+    PieceName.KING: chess.KING,
+}

@@ -8,6 +8,15 @@ from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from wizard_chess.application.session import GameSession
+from wizard_chess.configuration import (
+    ApplicationSettings,
+    EngineSettings,
+    PlayerKind,
+    PlayerSettings,
+)
+from wizard_chess.domain.move import ChessMove
+from wizard_chess.engine.mock import FakeEngine
+from wizard_chess.engine.models import EngineEvaluation, EngineLine, PositionAnalysis
 from wizard_chess.gui.main_window import MainWindow
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.speech.base import CancellationCheck
@@ -251,4 +260,124 @@ def test_gui_voice_failure_is_visible_and_preserves_game_state(
     assert session.snapshot().fen == original_fen
     assert window.command_input.isEnabled()
 
+    window.close()
+
+
+def test_gui_engine_analysis_runs_in_worker_and_renders_candidates(
+    qt_application: QApplication,
+) -> None:
+    board = GameSession().game.board
+    move = ChessMove.from_uci("e2e4")
+    engine = FakeEngine(
+        default=PositionAnalysis(
+            fen=board.fen(),
+            lines=(
+                EngineLine(
+                    move=move,
+                    evaluation=EngineEvaluation(score_cp=42),
+                    principal_variation=(move,),
+                ),
+            ),
+        )
+    )
+    settings = ApplicationSettings(engine=EngineSettings(enabled=True, analysis_enabled=True))
+    window = MainWindow(GameSession(settings=settings, engine=engine))
+
+    wait_for_gui(qt_application, lambda: "Ready" in window.engine_status_label.text())
+
+    assert window.evaluation_bar.format() == "Evaluation: +0.42"
+    assert "1. e4  +0.42" in window.analysis_view.toPlainText()
+    assert "PV: e4" in window.analysis_view.toPlainText()
+    window.close()
+    assert engine.closed
+
+
+def test_gui_engine_opponent_replies_without_a_second_move_path(
+    qt_application: QApplication,
+) -> None:
+    reply = ChessMove.from_uci("e7e5")
+    engine = FakeEngine(
+        default=PositionAnalysis(
+            fen="ignored",
+            lines=(
+                EngineLine(
+                    move=reply,
+                    evaluation=EngineEvaluation(score_cp=0),
+                    principal_variation=(reply,),
+                ),
+            ),
+        )
+    )
+    settings = ApplicationSettings(
+        engine=EngineSettings(enabled=True),
+        players=PlayerSettings(black_kind=PlayerKind.ENGINE),
+    )
+    session = GameSession(settings=settings, engine=engine)
+    window = MainWindow(session)
+    window.command_input.setText("e4")
+
+    QTest.mouseClick(window.play_button, Qt.MouseButton.LeftButton)
+    wait_for_gui(qt_application, lambda: session.snapshot().move_history == ("e4", "e5"))
+
+    assert session.snapshot().turn.value == "white"
+    assert window.command_input.isEnabled()
+    window.close()
+
+
+def test_gui_history_navigation_does_not_mutate_live_game(
+    qt_application: QApplication,
+) -> None:
+    del qt_application
+    session = GameSession()
+    session.play_text("e4")
+    session.play_text("e5")
+    live_fen = session.snapshot().fen
+    window = MainWindow(session)
+
+    window.history_slider.setValue(1)
+
+    assert "After ply 1" in window.history_position_label.text()
+    assert window.board_widget.piece_at("e5") is None
+    assert window.board_widget.piece_at("e7") == "p"
+    assert session.snapshot().fen == live_fen
+    assert not window.command_input.isEnabled()
+
+    QTest.mouseClick(window.live_position_button, Qt.MouseButton.LeftButton)
+    assert window.board_widget.piece_at("e5") == "p"
+    assert session.snapshot().fen == live_fen
+    window.close()
+
+
+def test_gui_post_game_analysis_reports_progress_without_mutating_game(
+    qt_application: QApplication,
+) -> None:
+    move = ChessMove.from_uci("e2e4")
+    engine = FakeEngine(
+        default=PositionAnalysis(
+            fen="ignored",
+            lines=(
+                EngineLine(
+                    move=move,
+                    evaluation=EngineEvaluation(score_cp=12),
+                    principal_variation=(move,),
+                ),
+            ),
+        )
+    )
+    settings = ApplicationSettings(engine=EngineSettings(enabled=True))
+    session = GameSession(settings=settings, engine=engine)
+    session.play_text("e4")
+    live_fen = session.snapshot().fen
+    window = MainWindow(session)
+
+    QTest.mouseClick(window.analyse_game_button, Qt.MouseButton.LeftButton)
+    wait_for_gui(
+        qt_application,
+        lambda: not window.game_analysis_active,
+    )
+
+    assert "Game analysis complete" in window.engine_status_label.text()
+    assert "White ACPL" in window.analysis_view.toPlainText()
+    assert "1. e4" in window.analysis_view.toPlainText()
+    assert session.snapshot().fen == live_fen
     window.close()

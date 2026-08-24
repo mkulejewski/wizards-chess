@@ -22,6 +22,8 @@ class GameStatus(StrEnum):
     SEVENTY_FIVE_MOVE_DRAW = "seventy_five_move_draw"
     FIVEFOLD_REPETITION = "fivefold_repetition"
     OTHER_GAME_OVER = "other_game_over"
+    RESIGNED = "resigned"
+    AGREED_DRAW = "agreed_draw"
 
 
 @dataclass(frozen=True, slots=True)
