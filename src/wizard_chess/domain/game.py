@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from io import StringIO
 from types import MappingProxyType
@@ -9,7 +10,7 @@ from types import MappingProxyType
 import chess
 import chess.pgn
 
-from wizard_chess.domain.events import MoveExecuted
+from wizard_chess.domain.events import MoveAnnotation, MoveExecuted
 from wizard_chess.domain.exceptions import (
     GameTerminationError,
     InvalidFenError,
@@ -25,8 +26,6 @@ from wizard_chess.domain.results import GameResult, GameStatus, PlayerColor
 class ChessGame:
     """The authoritative digital twin of a chessboard position and its history."""
 
-    _METADATA_FIELDS = ("Event", "Site", "Date", "Round", "White", "Black")
-
     def __init__(
         self,
         fen: str | None = None,
@@ -36,8 +35,11 @@ class ChessGame:
         self._board = chess.Board()
         self._redo_stack: list[chess.Move] = []
         self._metadata = self._clean_metadata(metadata or {})
+        self._move_annotations: dict[int, MoveAnnotation] = {}
+        self._move_comments: dict[int, str] = {}
         self._manual_status: GameStatus | None = None
         self._manual_winner: PlayerColor | None = None
+        self._redo_termination: tuple[int, GameStatus, PlayerColor | None] | None = None
         if fen is not None:
             self.load_fen(fen)
 
@@ -95,8 +97,16 @@ class ChessGame:
         python_move = move.to_python_chess()
 
         event = self._event_for(python_move)
+        current_ply = len(self._board.move_stack)
+        self._move_annotations = {
+            ply: value for ply, value in self._move_annotations.items() if ply <= current_ply
+        }
+        self._move_comments = {
+            ply: value for ply, value in self._move_comments.items() if ply <= current_ply
+        }
         self._board.push(python_move)
         self._redo_stack.clear()
+        self._redo_termination = None
         return event
 
     def validate_move(self, move: ChessMove) -> None:
@@ -113,6 +123,13 @@ class ChessGame:
         """Restore the position before the latest move."""
         if not self._board.move_stack:
             raise NoMoveToUndoError("There is no move to undo")
+        current_ply = len(self._board.move_stack)
+        if self._manual_status is not None:
+            self._redo_termination = (
+                current_ply,
+                self._manual_status,
+                self._manual_winner,
+            )
         move = self._board.pop()
         self._redo_stack.append(move)
         self._clear_manual_termination()
@@ -128,6 +145,11 @@ class ChessGame:
             raise InvalidMoveError(f"Undone move is no longer legal: {move.uci()}")
         event = self._event_for(move)
         self._board.push(move)
+        if self._redo_termination is not None and self._redo_termination[0] == len(
+            self._board.move_stack
+        ):
+            _ply, self._manual_status, self._manual_winner = self._redo_termination
+            self._redo_termination = None
         return event
 
     def fen(self) -> str:
@@ -144,6 +166,9 @@ class ChessGame:
             raise InvalidFenError(f"FEN describes an invalid position: {fen}")
         self._board = board
         self._redo_stack.clear()
+        self._move_annotations.clear()
+        self._move_comments.clear()
+        self._redo_termination = None
         self._clear_manual_termination()
 
     def is_check(self) -> bool:
@@ -209,8 +234,17 @@ class ChessGame:
         game = chess.pgn.Game.from_board(self._board)
         for name, value in self._metadata.items():
             game.headers[name] = value
-        game.headers["Result"] = self.result().notation
-        exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=False)
+        result = self.result()
+        game.headers["Result"] = result.notation
+        termination = self._termination_reason(result.status)
+        if termination is not None:
+            game.headers["Termination"] = termination
+        for ply, node in enumerate(game.mainline(), start=1):
+            comment = self._move_comments.get(ply, "").strip()
+            annotation = self._move_annotations.get(ply)
+            diagnostic_comment = _format_move_annotation(annotation) if annotation else ""
+            node.comment = " ".join(part for part in (comment, diagnostic_comment) if part)
+        exporter = chess.pgn.StringExporter(headers=True, variations=False, comments=True)
         return game.accept(exporter)
 
     def load_pgn(self, pgn: str) -> None:
@@ -236,14 +270,68 @@ class ChessGame:
         self._board = board
         self._redo_stack.clear()
         self._metadata = self._clean_metadata(parsed.headers)
+        self._move_annotations.clear()
+        self._move_comments.clear()
+        for ply, node in enumerate(parsed.mainline(), start=1):
+            annotation, remaining_comment = _parse_move_annotation(node.comment)
+            if annotation is not None:
+                self._move_annotations[ply] = annotation
+            if remaining_comment:
+                self._move_comments[ply] = remaining_comment
+        self._redo_termination = None
         self._clear_manual_termination()
         result = parsed.headers.get("Result", "*")
+        termination = parsed.headers.get("Termination", "").strip().lower()
         if not self._board.is_game_over(claim_draw=False):
             if result == "1/2-1/2":
-                self._manual_status = GameStatus.AGREED_DRAW
+                if "fifty" in termination or "50-move" in termination:
+                    self._manual_status = GameStatus.FIFTY_MOVE_RULE_CLAIM
+                elif "threefold" in termination:
+                    self._manual_status = GameStatus.THREEFOLD_REPETITION_CLAIM
+                elif "time" in termination:
+                    self._manual_status = GameStatus.TIME_FORFEIT
+                else:
+                    self._manual_status = GameStatus.AGREED_DRAW
             elif result in {"1-0", "0-1"}:
-                self._manual_status = GameStatus.RESIGNED
+                self._manual_status = (
+                    GameStatus.TIME_FORFEIT if "time" in termination else GameStatus.RESIGNED
+                )
                 self._manual_winner = PlayerColor.WHITE if result == "1-0" else PlayerColor.BLACK
+
+    def annotate_last_move(self, annotation: MoveAnnotation) -> None:
+        """Attach portable timing and engine facts to the latest move."""
+        if not self._board.move_stack:
+            raise InvalidMoveError("There is no move to annotate")
+        self._move_annotations[len(self._board.move_stack)] = annotation
+
+    def claim_draw(self) -> GameResult:
+        """Validate and record an available fifty-move or threefold draw claim."""
+        if self.is_game_over():
+            raise GameTerminationError("The game is already over")
+        if self._board.can_claim_fifty_moves():
+            self._manual_status = GameStatus.FIFTY_MOVE_RULE_CLAIM
+        elif self._board.can_claim_threefold_repetition():
+            self._manual_status = GameStatus.THREEFOLD_REPETITION_CLAIM
+        else:
+            raise GameTerminationError("No draw can be claimed in the current position")
+        self._manual_winner = None
+        self._redo_stack.clear()
+        self._redo_termination = None
+        return self.result()
+
+    def forfeit_on_time(self, color: PlayerColor) -> GameResult:
+        """End an ongoing game when ``color`` exhausts its game clock."""
+        if self.is_game_over():
+            raise GameTerminationError("The game is already over")
+        self._manual_status = GameStatus.TIME_FORFEIT
+        opponent = PlayerColor.BLACK if color is PlayerColor.WHITE else PlayerColor.WHITE
+        opponent_chess_color = chess.BLACK if opponent is PlayerColor.BLACK else chess.WHITE
+        self._manual_winner = (
+            None if self._board.has_insufficient_material(opponent_chess_color) else opponent
+        )
+        self._redo_stack.clear()
+        self._redo_termination = None
+        return self.result()
 
     def resign(self, color: PlayerColor | None = None) -> GameResult:
         """End an ongoing game by resignation of ``color`` or the side to move."""
@@ -255,6 +343,7 @@ class ChessGame:
             PlayerColor.BLACK if resigned is PlayerColor.WHITE else PlayerColor.WHITE
         )
         self._redo_stack.clear()
+        self._redo_termination = None
         return self.result()
 
     def agree_draw(self) -> GameResult:
@@ -264,6 +353,7 @@ class ChessGame:
         self._manual_status = GameStatus.AGREED_DRAW
         self._manual_winner = None
         self._redo_stack.clear()
+        self._redo_termination = None
         return self.result()
 
     def _clear_manual_termination(self) -> None:
@@ -272,12 +362,38 @@ class ChessGame:
 
     @classmethod
     def _clean_metadata(cls, values: Mapping[str, str]) -> dict[str, str]:
-        return {
-            name: str(values[name]).strip()
-            for name in cls._METADATA_FIELDS
-            if name in values
-            and any(character not in "?.-/ " for character in str(values[name]).strip())
+        placeholders = {
+            "Event": "?",
+            "Site": "?",
+            "Date": "????.??.??",
+            "Round": "?",
+            "White": "?",
+            "Black": "?",
         }
+        return {
+            str(name): str(value).strip()
+            for name, value in values.items()
+            if str(value).strip()
+            and str(name) != "Result"
+            and str(value).strip() != placeholders.get(str(name))
+        }
+
+    @staticmethod
+    def _termination_reason(status: GameStatus) -> str | None:
+        reasons = {
+            GameStatus.CHECKMATE: "checkmate",
+            GameStatus.STALEMATE: "stalemate",
+            GameStatus.INSUFFICIENT_MATERIAL: "insufficient material",
+            GameStatus.SEVENTY_FIVE_MOVE_DRAW: "seventy-five-move rule",
+            GameStatus.FIVEFOLD_REPETITION: "fivefold repetition",
+            GameStatus.FIFTY_MOVE_RULE_CLAIM: "fifty-move rule claim",
+            GameStatus.THREEFOLD_REPETITION_CLAIM: "threefold repetition claim",
+            GameStatus.TIME_FORFEIT: "time forfeit",
+            GameStatus.RESIGNED: "resignation",
+            GameStatus.AGREED_DRAW: "draw agreement",
+            GameStatus.OTHER_GAME_OVER: "normal",
+        }
+        return reasons.get(status)
 
     def _event_for(self, move: chess.Move) -> MoveExecuted:
         is_en_passant = self._board.is_en_passant(move)
@@ -336,3 +452,98 @@ class ChessGame:
 
         piece_name = chess.piece_name(piece.piece_type)
         return f"{prefix} the {piece_name} cannot move from {move.source} to {move.target}"
+
+
+_ANNOTATION_PATTERN = re.compile(
+    r"\[%(?P<name>emt|clk|eval|depth|nodes|tbhits)\s+(?P<value>[^\]]+)\]",
+    re.IGNORECASE,
+)
+
+
+def _format_move_annotation(annotation: MoveAnnotation) -> str:
+    tags: list[str] = []
+    if annotation.elapsed_seconds is not None:
+        tags.append(f"[%emt {_format_pgn_time(annotation.elapsed_seconds)}]")
+    if annotation.remaining_seconds is not None:
+        tags.append(f"[%clk {_format_pgn_time(annotation.remaining_seconds)}]")
+    if annotation.mate_in is not None:
+        tags.append(f"[%eval #{annotation.mate_in}]")
+    elif annotation.evaluation_cp is not None:
+        tags.append(f"[%eval {annotation.evaluation_cp / 100:.2f}]")
+    if annotation.depth is not None:
+        tags.append(f"[%depth {annotation.depth}]")
+    if annotation.nodes is not None:
+        tags.append(f"[%nodes {annotation.nodes}]")
+    if annotation.tablebase_hits is not None:
+        tags.append(f"[%tbhits {annotation.tablebase_hits}]")
+    return " ".join(tags)
+
+
+def _parse_move_annotation(comment: str) -> tuple[MoveAnnotation | None, str]:
+    values: dict[str, str] = {}
+    for match in _ANNOTATION_PATTERN.finditer(comment):
+        values[match.group("name").lower()] = match.group("value").strip()
+    remaining = " ".join(_ANNOTATION_PATTERN.sub("", comment).split())
+    if not values:
+        return None, remaining
+    evaluation_cp: int | None = None
+    mate_in: int | None = None
+    evaluation = values.get("eval")
+    if evaluation is not None:
+        try:
+            if evaluation.startswith("#"):
+                mate_in = int(evaluation[1:])
+            else:
+                evaluation_cp = round(float(evaluation.split(",", 1)[0]) * 100)
+        except ValueError:
+            evaluation_cp = None
+            mate_in = None
+    evaluation_parts = evaluation.split(",", 1) if evaluation is not None else []
+    combined_depth = (
+        _parse_optional_int(evaluation_parts[1]) if len(evaluation_parts) == 2 else None
+    )
+    annotation = MoveAnnotation(
+        elapsed_seconds=_parse_pgn_time(values.get("emt")),
+        remaining_seconds=_parse_pgn_time(values.get("clk")),
+        evaluation_cp=evaluation_cp,
+        mate_in=mate_in,
+        depth=_parse_optional_int(values.get("depth")) or combined_depth,
+        nodes=_parse_optional_int(values.get("nodes")),
+        tablebase_hits=_parse_optional_int(values.get("tbhits")),
+    )
+    return annotation, remaining
+
+
+def _format_pgn_time(seconds: float) -> str:
+    total = max(0.0, seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    rendered_seconds = f"{remaining_seconds:06.3f}".rstrip("0").rstrip(".")
+    if remaining_seconds < 10 and not rendered_seconds.startswith("0"):
+        rendered_seconds = f"0{rendered_seconds}"
+    return f"{int(hours)}:{int(minutes):02d}:{rendered_seconds}"
+
+
+def _parse_pgn_time(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        parts = [float(part) for part in value.split(":")]
+    except ValueError:
+        return None
+    if len(parts) == 3:
+        return parts[0] * 3600 + parts[1] * 60 + parts[2]
+    if len(parts) == 2:
+        return parts[0] * 60 + parts[1]
+    if len(parts) == 1:
+        return parts[0]
+    return None
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None

@@ -22,7 +22,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wizard_chess.configuration import ApplicationSettings, EngineSettings, EngineStrength
+from wizard_chess.configuration import (
+    ApplicationSettings,
+    EngineSettings,
+    EngineStrength,
+    StockfishPlayerMode,
+)
 from wizard_chess.engine.factory import validate_stockfish_engine
 
 EngineValidator = Callable[[EngineSettings], None]
@@ -58,6 +63,20 @@ class EnginePreferencesDialog(QDialog):
         self.think_time_spin.setDecimals(2)
         self.think_time_spin.setSingleStep(0.25)
         self.think_time_spin.setSuffix(" s")
+        self.post_game_time_spin = QDoubleSpinBox()
+        self.post_game_time_spin.setRange(0.05, 120.0)
+        self.post_game_time_spin.setDecimals(2)
+        self.post_game_time_spin.setSingleStep(0.25)
+        self.post_game_time_spin.setSuffix(" s per position")
+        self.player_mode_combo = QComboBox()
+        self.player_mode_combo.addItem(
+            "Fixed analysis time per move",
+            StockfishPlayerMode.FIXED_ANALYSIS_TIME.value,
+        )
+        self.player_mode_combo.addItem(
+            "Game-clock time management",
+            StockfishPlayerMode.GAME_CLOCK.value,
+        )
         self.live_analysis_checkbox = QCheckBox("Enable live analysis")
 
         self.multipv_spin = QSpinBox()
@@ -70,11 +89,21 @@ class EnginePreferencesDialog(QDialog):
         self.hash_spin = QSpinBox()
         self.hash_spin.setRange(1, 1_048_576)
         self.hash_spin.setSuffix(" MB")
+        self.syzygy_path_edit = QLineEdit()
+        self.syzygy_path_edit.setPlaceholderText("Optional local Syzygy directory")
+        self.syzygy_browse_button = QPushButton("Choose…")
+        self.syzygy_clear_button = QPushButton("Clear")
+        self.syzygy_probe_limit_spin = QSpinBox()
+        self.syzygy_probe_limit_spin.setRange(0, 7)
+        self.syzygy_50_move_rule_checkbox = QCheckBox("Respect the 50-move rule")
 
         self._build_layout()
         self._load_settings(settings.engine)
         self.browse_button.clicked.connect(self._browse)
+        self.syzygy_browse_button.clicked.connect(self._browse_syzygy)
+        self.syzygy_clear_button.clicked.connect(self.syzygy_path_edit.clear)
         self.test_button.clicked.connect(self._test_engine)
+        self.player_mode_combo.currentIndexChanged.connect(self._update_mode_controls)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
@@ -84,12 +113,17 @@ class EnginePreferencesDialog(QDialog):
             enabled=(self._base_settings.engine.enabled or self.live_analysis_checkbox.isChecked()),
             path=self.path_edit.text().strip() or None,
             analysis_enabled=self.live_analysis_checkbox.isChecked(),
-            analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
+            player_mode=StockfishPlayerMode(str(self.player_mode_combo.currentData())),
+            player_move_analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
+            post_game_analysis_time_ms=max(1, round(self.post_game_time_spin.value() * 1000)),
             analysis_depth=self.depth_spin.value() or None,
             multipv=self.multipv_spin.value(),
             strength=EngineStrength(str(self.strength_combo.currentData())),
             threads=self.threads_spin.value(),
             hash_mb=self.hash_spin.value(),
+            syzygy_path=self.syzygy_path_edit.text().strip() or None,
+            syzygy_probe_limit=self.syzygy_probe_limit_spin.value(),
+            syzygy_50_move_rule=self.syzygy_50_move_rule_checkbox.isChecked(),
         )
         return replace(self._base_settings, engine=engine).with_required_engine()
 
@@ -106,7 +140,9 @@ class EnginePreferencesDialog(QDialog):
         defaults_group = QGroupBox("Defaults")
         defaults_form = QFormLayout(defaults_group)
         defaults_form.addRow("Strength:", self.strength_combo)
-        defaults_form.addRow("Think time:", self.think_time_spin)
+        defaults_form.addRow("Stockfish player mode:", self.player_mode_combo)
+        defaults_form.addRow("Fixed bot analysis time:", self.think_time_spin)
+        defaults_form.addRow("After-game analysis time:", self.post_game_time_spin)
         defaults_form.addRow(self.live_analysis_checkbox)
         layout.addWidget(defaults_group)
 
@@ -118,6 +154,17 @@ class EnginePreferencesDialog(QDialog):
         advanced_form.addRow("Hash size:", self.hash_spin)
         layout.addWidget(advanced_group)
 
+        syzygy_group = QGroupBox("Syzygy tablebases")
+        syzygy_form = QFormLayout(syzygy_group)
+        syzygy_path_row = QHBoxLayout()
+        syzygy_path_row.addWidget(self.syzygy_path_edit, 1)
+        syzygy_path_row.addWidget(self.syzygy_browse_button)
+        syzygy_path_row.addWidget(self.syzygy_clear_button)
+        syzygy_form.addRow("Directory:", syzygy_path_row)
+        syzygy_form.addRow("Probe limit:", self.syzygy_probe_limit_spin)
+        syzygy_form.addRow(self.syzygy_50_move_rule_checkbox)
+        layout.addWidget(syzygy_group)
+
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
         )
@@ -128,12 +175,20 @@ class EnginePreferencesDialog(QDialog):
         self.strength_combo.setCurrentIndex(
             max(0, self.strength_combo.findData(settings.strength.value))
         )
-        self.think_time_spin.setValue(settings.analysis_time_ms / 1000)
+        self.player_mode_combo.setCurrentIndex(
+            max(0, self.player_mode_combo.findData(settings.player_mode.value))
+        )
+        self.think_time_spin.setValue(settings.player_move_analysis_time_ms / 1000)
+        self.post_game_time_spin.setValue(settings.post_game_analysis_time_ms / 1000)
         self.live_analysis_checkbox.setChecked(settings.analysis_enabled)
         self.multipv_spin.setValue(settings.multipv)
         self.depth_spin.setValue(settings.analysis_depth or 0)
         self.threads_spin.setValue(settings.threads)
         self.hash_spin.setValue(settings.hash_mb)
+        self.syzygy_path_edit.setText(settings.syzygy_path or "")
+        self.syzygy_probe_limit_spin.setValue(settings.syzygy_probe_limit)
+        self.syzygy_50_move_rule_checkbox.setChecked(settings.syzygy_50_move_rule)
+        self._update_mode_controls()
 
     def _browse(self) -> None:
         path, _selected_filter = QFileDialog.getOpenFileName(
@@ -144,6 +199,20 @@ class EnginePreferencesDialog(QDialog):
         )
         if path:
             self.path_edit.setText(path)
+
+    def _browse_syzygy(self) -> None:
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Syzygy tablebase directory",
+            self.syzygy_path_edit.text(),
+        )
+        if path:
+            self.syzygy_path_edit.setText(path)
+
+    def _update_mode_controls(self) -> None:
+        self.think_time_spin.setEnabled(
+            self.player_mode_combo.currentData() == StockfishPlayerMode.FIXED_ANALYSIS_TIME.value
+        )
 
     def _test_engine(self) -> None:
         try:

@@ -25,3 +25,5 @@ uv run pyright
 PySide6 is the sole approved GUI framework for the Stage 1.1B desktop adapter. Do not add
 other GUI frameworks, audio, engine-analysis, serial, motor, sensor, or network dependencies
 without an explicit later project-stage requirement.
+
+Note every modification and increment in AGENT_INCREMENTS file.

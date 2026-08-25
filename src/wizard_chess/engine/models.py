@@ -41,6 +41,37 @@ class EngineLine:
     move: ChessMove
     evaluation: EngineEvaluation
     principal_variation: tuple[ChessMove, ...] = ()
+    depth: int | None = None
+    selective_depth: int | None = None
+    nodes: int | None = None
+    nps: int | None = None
+    tablebase_hits: int | None = None
+    search_time_seconds: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EngineClockState:
+    """Clock values passed to UCI without coupling the engine to the application clock."""
+
+    white_seconds: float
+    black_seconds: float
+    white_increment_seconds: float
+    black_increment_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class EngineDecision:
+    """A selected move plus the search information returned with it."""
+
+    move: ChessMove
+    evaluation: EngineEvaluation | None = None
+    depth: int | None = None
+    selective_depth: int | None = None
+    nodes: int | None = None
+    nps: int | None = None
+    tablebase_hits: int | None = None
+    search_time_seconds: float | None = None
+    engine_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

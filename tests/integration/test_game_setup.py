@@ -13,6 +13,7 @@ from wizard_chess.configuration import (
     EngineStrength,
     PlayerKind,
     PlayerSettings,
+    StockfishPlayerMode,
 )
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.engine.mock import FakeEngine
@@ -124,11 +125,18 @@ def test_engine_preferences_exposes_path_defaults_and_advanced_values(
         dialog.strength_combo.findData(EngineStrength.EXPERT.value)
     )
     dialog.think_time_spin.setValue(2.5)
+    dialog.post_game_time_spin.setValue(3.5)
+    dialog.player_mode_combo.setCurrentIndex(
+        dialog.player_mode_combo.findData(StockfishPlayerMode.GAME_CLOCK.value)
+    )
     dialog.live_analysis_checkbox.setChecked(True)
     dialog.multipv_spin.setValue(5)
     dialog.depth_spin.setValue(18)
     dialog.threads_spin.setValue(4)
     dialog.hash_spin.setValue(256)
+    dialog.syzygy_path_edit.setText("/opt/syzygy")
+    dialog.syzygy_probe_limit_spin.setValue(6)
+    dialog.syzygy_50_move_rule_checkbox.setChecked(False)
 
     selected = dialog.selected_settings()
 
@@ -136,13 +144,36 @@ def test_engine_preferences_exposes_path_defaults_and_advanced_values(
         enabled=True,
         path="/opt/custom-stockfish",
         analysis_enabled=True,
-        analysis_time_ms=2500,
+        player_mode=StockfishPlayerMode.GAME_CLOCK,
+        player_move_analysis_time_ms=2500,
+        post_game_analysis_time_ms=3500,
         analysis_depth=18,
         multipv=5,
         strength=EngineStrength.EXPERT,
         threads=4,
         hash_mb=256,
+        syzygy_path="/opt/syzygy",
+        syzygy_probe_limit=6,
+        syzygy_50_move_rule=False,
     )
+
+
+def test_game_setup_clock_managed_stockfish_requires_and_persists_clock(
+    qt_application: QApplication,
+) -> None:
+    del qt_application
+    dialog = GameSetupDialog(ApplicationSettings())
+    dialog.preset_combo.setCurrentIndex(2)
+    dialog.player_mode_combo.setCurrentIndex(
+        dialog.player_mode_combo.findData(StockfishPlayerMode.GAME_CLOCK.value)
+    )
+
+    selected = dialog.selected_settings()
+
+    assert dialog.clock_enabled_checkbox.isChecked()
+    assert not dialog.clock_enabled_checkbox.isEnabled()
+    assert selected.engine.player_mode is StockfishPlayerMode.GAME_CLOCK
+    assert selected.clock.enabled
 
 
 def test_engine_as_white_uses_async_canonical_move_path(

@@ -22,6 +22,9 @@ class GameStatus(StrEnum):
     SEVENTY_FIVE_MOVE_DRAW = "seventy_five_move_draw"
     FIVEFOLD_REPETITION = "fivefold_repetition"
     OTHER_GAME_OVER = "other_game_over"
+    FIFTY_MOVE_RULE_CLAIM = "fifty_move_rule_claim"
+    THREEFOLD_REPETITION_CLAIM = "threefold_repetition_claim"
+    TIME_FORFEIT = "time_forfeit"
     RESIGNED = "resigned"
     AGREED_DRAW = "agreed_draw"
 

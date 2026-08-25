@@ -1,6 +1,6 @@
 """Authoritative chess domain model."""
 
-from wizard_chess.domain.events import MoveExecuted
+from wizard_chess.domain.events import MoveAnnotation, MoveExecuted
 from wizard_chess.domain.exceptions import (
     AmbiguousMoveError,
     AnalysisCancelledError,
@@ -35,6 +35,7 @@ __all__ = [
     "InvalidFenError",
     "InvalidMoveError",
     "InvalidPgnError",
+    "MoveAnnotation",
     "MoveExecuted",
     "NoMoveToRedoError",
     "NoMoveToUndoError",

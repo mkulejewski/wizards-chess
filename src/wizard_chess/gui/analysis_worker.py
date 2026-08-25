@@ -17,29 +17,36 @@ class GameAnalysisWorker(QThread):
     succeeded = Signal(object)
     failed = Signal(object)
 
-    def __init__(self, engine: ChessEngine, pgn: str) -> None:
+    def __init__(self, engine: ChessEngine, pgn: str, analysis_time_ms: int) -> None:
         super().__init__()
         self._engine = engine
         self._pgn = pgn
+        self._analysis_time_ms = analysis_time_ms
         self._cancelled = Event()
 
     def run(self) -> None:
         game = ChessGame()
         try:
             game.load_pgn(self._pgn)
-            result = AnalysisService(self._engine).analyse_game(
+            result = AnalysisService(
+                self._engine,
+                analysis_time_ms=self._analysis_time_ms,
+            ).analyse_game(
                 game,
                 on_progress=self._emit_progress,
                 cancel_requested=self._cancelled.is_set,
             )
         except Exception as error:
-            self.failed.emit(error)
+            if not self._cancelled.is_set():
+                self.failed.emit(error)
             return
         if not self._cancelled.is_set():
             self.succeeded.emit(result)
 
-    def cancel(self) -> None:
+    def cancel(self, *, stop_engine: bool = False) -> None:
         self._cancelled.set()
+        if stop_engine:
+            self._engine.cancel_pending()
 
     def _emit_progress(self, completed: int, total: int) -> None:
         self.progress.emit(completed, total)

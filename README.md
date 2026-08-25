@@ -76,6 +76,7 @@ Stockfish.
 The GUI provides:
 
 - click-to-move with legal destinations, last-move highlighting, promotion choice, and flip;
+- offline Tatiana or classic-symbol pieces plus five persistent board color themes;
 - typed SAN, coordinate syntax, and application commands;
 - move history plus a ply slider for inspecting old positions without changing the live game;
 - Game Setup/New Game, Engine Preferences, Undo, Redo, FEN load/copy, and PGN import/export;
@@ -101,10 +102,15 @@ distribution. Wizard Chess does not bundle a binary. The normal graphical workfl
 2. Open **Preferences…** and select the Stockfish executable if it is not already on `PATH`.
 3. Use **Test Engine** to validate the executable.
 4. In **Game Setup**, choose Human or Stockfish for White and Black.
-5. Choose strength, think time, and optional clock settings.
+5. Choose strength and either **Fixed analysis time per move** or **Game-clock time
+   management**. Clock-managed Stockfish requires the game clock and receives both remaining
+   times and increments on every move.
 6. Remember the setup and choose whether to show Game Setup or reuse it automatically.
 
-Engine Preferences also contains live analysis, MultiPV, depth, threads, and hash size. The
+Engine Preferences also contains a separate after-game analysis budget, live analysis,
+MultiPV, depth, threads, hash size, and an optional local Syzygy directory. Syzygy files are
+not bundled or downloaded; an unavailable or unsupported directory falls back to normal
+search. The
 preferences are persisted in Wizard Chess's existing XDG-backed `settings.json`; future starts
 then require only `uv run wizard-chess`. Choosing Stockfish as either player enables the engine
 implicitly. If no path is saved, Wizard Chess discovers `stockfish` on `PATH`.
@@ -141,12 +147,18 @@ launching the application.
 | `WIZARD_CHESS_ENGINE_ENABLED` | `false` | Enable the lazy Stockfish adapter |
 | `WIZARD_CHESS_ENGINE_PATH` | discovered | UCI executable path |
 | `WIZARD_CHESS_ANALYSIS_ENABLED` | engine setting | Live analysis |
-| `WIZARD_CHESS_ENGINE_TIME_MS` | `500` | Time per request |
+| `WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS` | `500` | Fixed Stockfish-player time per move |
+| `WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS` | `500` | Completed-game time per position |
+| `WIZARD_CHESS_STOCKFISH_PLAYER_MODE` | `fixed_analysis_time` | `fixed_analysis_time` or `game_clock` |
+| `WIZARD_CHESS_ENGINE_TIME_MS` | unset | Legacy value migrated to both analysis budgets |
 | `WIZARD_CHESS_ENGINE_DEPTH` | unset | Optional depth limit |
 | `WIZARD_CHESS_ENGINE_MULTIPV` | `3` | Candidate line count |
 | `WIZARD_CHESS_ENGINE_STRENGTH` | `club` | Strength band |
 | `WIZARD_CHESS_ENGINE_THREADS` | `1` | UCI thread count |
 | `WIZARD_CHESS_ENGINE_HASH_MB` | `128` | UCI hash size |
+| `WIZARD_CHESS_SYZYGY_PATH` | unset | Optional local Syzygy directory |
+| `WIZARD_CHESS_SYZYGY_PROBE_LIMIT` | `7` | Maximum pieces probed when supported |
+| `WIZARD_CHESS_SYZYGY_50_MOVE_RULE` | `true` | Respect the 50-move rule in tablebase probing |
 
 Strength values are `beginner`, `casual`, `club`, `strong_club`, `expert`, `master`, and
 `maximum`. They map to supported engine controls and are not advertised as exact Elo ratings.
@@ -237,6 +249,9 @@ Enable autosave with `WIZARD_CHESS_AUTOSAVE=true`. State defaults to
 `$XDG_STATE_HOME/wizard-chess` or `~/.local/state/wizard-chess`. Preferences use
 `$XDG_CONFIG_HOME/wizard-chess/settings.json` or `~/.config/wizard-chess/settings.json` and
 load missing old fields from current defaults.
+
+Board appearance is also stored in `settings.json`. The bundled Tatiana SVG artwork is used
+under its original license; see [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
 
 Player names use `WIZARD_CHESS_WHITE_NAME` and `WIZARD_CHESS_BLACK_NAME`. Optional clocks use:
 

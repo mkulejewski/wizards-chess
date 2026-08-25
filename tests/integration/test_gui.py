@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from threading import Event
 from time import monotonic
 
@@ -9,8 +10,11 @@ from PySide6.QtWidgets import QApplication
 
 from wizard_chess.application.session import GameSession
 from wizard_chess.configuration import (
+    AppearanceSettings,
     ApplicationSettings,
+    BoardTheme,
     EngineSettings,
+    PieceSet,
     PlayerKind,
     PlayerSettings,
 )
@@ -19,6 +23,7 @@ from wizard_chess.engine.mock import FakeEngine
 from wizard_chess.engine.models import EngineEvaluation, EngineLine, PositionAnalysis
 from wizard_chess.gui.main_window import MainWindow
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
+from wizard_chess.persistence.settings_store import SettingsStore
 from wizard_chess.speech.base import CancellationCheck
 from wizard_chess.speech.controller import VoiceController
 from wizard_chess.speech.mock import MockAudioInput, MockSpeechRecognizer
@@ -91,6 +96,39 @@ def test_gui_renders_initial_authoritative_position(qt_application: QApplication
     assert window.board_widget.piece_at("e8") == "k"
     assert window.board_widget.piece_at("a8") == "r"
     assert window.status_label.text() == "White to move"
+
+    window.close()
+
+
+def test_gui_switches_and_persists_board_appearance_without_changing_game(
+    qt_application: QApplication, tmp_path: Path
+) -> None:
+    del qt_application
+    session = GameSession()
+    original = session.snapshot()
+    store = SettingsStore(tmp_path / "settings.json")
+    window = MainWindow(session, settings_store=store)
+
+    assert window.board_widget.piece_set is PieceSet.TATIANA
+    assert window.board_widget.board_theme is BoardTheme.WALNUT
+    assert window.piece_set_combo.count() == 2
+    assert window.board_theme_combo.count() == 5
+
+    window.piece_set_combo.setCurrentIndex(
+        window.piece_set_combo.findData(PieceSet.CLASSIC_SYMBOLS.value)
+    )
+    window.board_theme_combo.setCurrentIndex(
+        window.board_theme_combo.findData(BoardTheme.BLUE.value)
+    )
+
+    assert window.board_widget.piece_set is PieceSet.CLASSIC_SYMBOLS
+    assert window.board_widget.board_theme is BoardTheme.BLUE
+    assert store.load().appearance == AppearanceSettings(
+        piece_set=PieceSet.CLASSIC_SYMBOLS,
+        board_theme=BoardTheme.BLUE,
+    )
+    assert session.snapshot().fen == original.fen
+    assert session.snapshot().move_history == original.move_history
 
     window.close()
 

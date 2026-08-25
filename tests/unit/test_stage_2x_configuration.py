@@ -3,12 +3,16 @@ from pathlib import Path
 import pytest
 
 from wizard_chess.configuration import (
+    AppearanceSettings,
     ApplicationSettings,
+    BoardTheme,
     ClockSettings,
     EngineSettings,
     EngineStrength,
+    PieceSet,
     PlayerKind,
     PlayerSettings,
+    StockfishPlayerMode,
     VoiceLanguage,
     should_show_game_setup,
 )
@@ -24,6 +28,12 @@ def test_environment_configuration_covers_optional_subsystems(
         "WIZARD_CHESS_ENGINE_PATH": "/opt/stockfish",
         "WIZARD_CHESS_ANALYSIS_ENABLED": "yes",
         "WIZARD_CHESS_ENGINE_MULTIPV": "4",
+        "WIZARD_CHESS_STOCKFISH_PLAYER_MODE": "game_clock",
+        "WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS": "800",
+        "WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS": "2400",
+        "WIZARD_CHESS_SYZYGY_PATH": "/opt/syzygy",
+        "WIZARD_CHESS_SYZYGY_PROBE_LIMIT": "6",
+        "WIZARD_CHESS_SYZYGY_50_MOVE_RULE": "false",
         "WIZARD_CHESS_BLACK_PLAYER": "engine",
         "WIZARD_CHESS_BLACK_NAME": "Komputer",
         "WIZARD_CHESS_CLOCK_ENABLED": "1",
@@ -39,6 +49,12 @@ def test_environment_configuration_covers_optional_subsystems(
     assert settings.voice_language is VoiceLanguage.POLISH
     assert settings.engine.path == "/opt/stockfish"
     assert settings.engine.multipv == 4
+    assert settings.engine.player_mode is StockfishPlayerMode.GAME_CLOCK
+    assert settings.engine.player_move_analysis_time_ms == 800
+    assert settings.engine.post_game_analysis_time_ms == 2400
+    assert settings.engine.syzygy_path == "/opt/syzygy"
+    assert settings.engine.syzygy_probe_limit == 6
+    assert not settings.engine.syzygy_50_move_rule
     assert settings.players.black_kind is PlayerKind.ENGINE
     assert settings.players.black_name == "Komputer"
     assert settings.clock == ClockSettings(enabled=True, initial_seconds=300, increment_seconds=3)
@@ -52,13 +68,18 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
         engine=EngineSettings(
             enabled=True,
             path="stockfish",
-            analysis_time_ms=2500,
+            player_move_analysis_time_ms=2500,
+            post_game_analysis_time_ms=2500,
             multipv=2,
             strength=EngineStrength.STRONG_CLUB,
         ),
         players=PlayerSettings(
             white_kind=PlayerKind.ENGINE,
             black_kind=PlayerKind.HUMAN,
+        ),
+        appearance=AppearanceSettings(
+            piece_set=PieceSet.CLASSIC_SYMBOLS,
+            board_theme=BoardTheme.BLUE,
         ),
         game_setup_saved=True,
         show_game_setup_on_startup=False,
@@ -74,6 +95,7 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
     defaulted = store.load()
     assert defaulted.autosave
     assert defaulted.voice_language is VoiceLanguage.ENGLISH
+    assert defaulted.appearance == AppearanceSettings()
 
 
 def test_environment_values_override_persisted_values_without_replacing_them() -> None:
@@ -81,7 +103,8 @@ def test_environment_values_override_persisted_values_without_replacing_them() -
         engine=EngineSettings(
             path="/persisted/stockfish",
             strength=EngineStrength.CLUB,
-            analysis_time_ms=1500,
+            player_move_analysis_time_ms=1500,
+            post_game_analysis_time_ms=1500,
             analysis_depth=12,
         ),
         players=PlayerSettings(black_kind=PlayerKind.ENGINE),
@@ -100,7 +123,8 @@ def test_environment_values_override_persisted_values_without_replacing_them() -
     )
 
     assert effective.engine.strength is EngineStrength.EXPERT
-    assert effective.engine.analysis_time_ms == 3000
+    assert effective.engine.player_move_analysis_time_ms == 3000
+    assert effective.engine.post_game_analysis_time_ms == 3000
     assert effective.engine.path is None
     assert effective.engine.analysis_depth is None
     assert effective.engine.enabled

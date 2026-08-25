@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +34,23 @@ class PlayerKind(StrEnum):
     ENGINE = "engine"
 
 
+class PieceSet(StrEnum):
+    """Locally rendered chess-piece artwork choices."""
+
+    TATIANA = "tatiana"
+    CLASSIC_SYMBOLS = "classic_symbols"
+
+
+class BoardTheme(StrEnum):
+    """Color palettes available to the desktop board adapter."""
+
+    WALNUT = "walnut"
+    BROWN = "brown"
+    GREEN = "green"
+    BLUE = "blue"
+    SLATE = "slate"
+
+
 class EngineStrength(StrEnum):
     """User-facing engine strength bands, not promised Elo ratings."""
 
@@ -46,6 +63,13 @@ class EngineStrength(StrEnum):
     MAXIMUM = "maximum"
 
 
+class StockfishPlayerMode(StrEnum):
+    """How a Stockfish-controlled player receives its search budget."""
+
+    FIXED_ANALYSIS_TIME = "fixed_analysis_time"
+    GAME_CLOCK = "game_clock"
+
+
 @dataclass(frozen=True, slots=True)
 class EngineSettings:
     """Settings for optional UCI analysis and engine play."""
@@ -53,22 +77,31 @@ class EngineSettings:
     enabled: bool = False
     path: str | None = None
     analysis_enabled: bool = False
-    analysis_time_ms: int = 500
+    player_mode: StockfishPlayerMode = StockfishPlayerMode.FIXED_ANALYSIS_TIME
+    player_move_analysis_time_ms: int = 500
+    post_game_analysis_time_ms: int = 500
     analysis_depth: int | None = None
     multipv: int = 3
     strength: EngineStrength = EngineStrength.CLUB
     threads: int = 1
     hash_mb: int = 128
+    syzygy_path: str | None = None
+    syzygy_probe_limit: int = 7
+    syzygy_50_move_rule: bool = True
 
     def __post_init__(self) -> None:
-        if self.analysis_time_ms <= 0:
-            raise ValueError("Engine analysis time must be positive")
+        if self.player_move_analysis_time_ms <= 0:
+            raise ValueError("Stockfish player move analysis time must be positive")
+        if self.post_game_analysis_time_ms <= 0:
+            raise ValueError("Post-game analysis time must be positive")
         if self.analysis_depth is not None and self.analysis_depth <= 0:
             raise ValueError("Engine analysis depth must be positive")
         if self.multipv <= 0:
             raise ValueError("Engine MultiPV count must be positive")
         if self.threads <= 0 or self.hash_mb <= 0:
             raise ValueError("Engine thread and hash settings must be positive")
+        if not 0 <= self.syzygy_probe_limit <= 7:
+            raise ValueError("Syzygy probe limit must be between 0 and 7")
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +130,14 @@ class ClockSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class AppearanceSettings:
+    """Presentation-only settings for the desktop chessboard."""
+
+    piece_set: PieceSet = PieceSet.TATIANA
+    board_theme: BoardTheme = BoardTheme.WALNUT
+
+
+@dataclass(frozen=True, slots=True)
 class ApplicationSettings:
     """Central configuration with conservative, dependency-free defaults."""
 
@@ -106,6 +147,7 @@ class ApplicationSettings:
     engine: EngineSettings = field(default_factory=EngineSettings)
     players: PlayerSettings = field(default_factory=PlayerSettings)
     clock: ClockSettings = field(default_factory=ClockSettings)
+    appearance: AppearanceSettings = field(default_factory=AppearanceSettings)
     game_setup_saved: bool = False
     show_game_setup_on_startup: bool = True
     autosave: bool = False
@@ -131,28 +173,7 @@ class ApplicationSettings:
         """Derive the low-level engine flag from user-facing feature choices."""
         if self.engine.enabled == self.engine_required:
             return self
-        return ApplicationSettings(
-            voice_language=self.voice_language,
-            confirmation_policy=self.confirmation_policy,
-            confidence_threshold=self.confidence_threshold,
-            engine=EngineSettings(
-                enabled=self.engine_required,
-                path=self.engine.path,
-                analysis_enabled=self.engine.analysis_enabled,
-                analysis_time_ms=self.engine.analysis_time_ms,
-                analysis_depth=self.engine.analysis_depth,
-                multipv=self.engine.multipv,
-                strength=self.engine.strength,
-                threads=self.engine.threads,
-                hash_mb=self.engine.hash_mb,
-            ),
-            players=self.players,
-            clock=self.clock,
-            game_setup_saved=self.game_setup_saved,
-            show_game_setup_on_startup=self.show_game_setup_on_startup,
-            autosave=self.autosave,
-            logging_level=self.logging_level,
-        )
+        return replace(self, engine=replace(self.engine, enabled=self.engine_required))
 
     @classmethod
     def from_environment(
@@ -206,6 +227,22 @@ class ApplicationSettings:
         clock_enabled = _bool_environment(
             values, "WIZARD_CHESS_CLOCK_ENABLED", defaults.clock.enabled
         )
+        legacy_time_ms = _int_environment(
+            values,
+            "WIZARD_CHESS_ENGINE_TIME_MS",
+            defaults.engine.player_move_analysis_time_ms,
+            1,
+        )
+        player_time_default = (
+            legacy_time_ms
+            if "WIZARD_CHESS_ENGINE_TIME_MS" in values
+            else defaults.engine.player_move_analysis_time_ms
+        )
+        post_game_time_default = (
+            legacy_time_ms
+            if "WIZARD_CHESS_ENGINE_TIME_MS" in values
+            else defaults.engine.post_game_analysis_time_ms
+        )
         settings = cls(
             voice_language=language,
             confirmation_policy=_enum_environment(
@@ -225,10 +262,22 @@ class ApplicationSettings:
                 enabled=engine_enabled,
                 path=path,
                 analysis_enabled=analysis_enabled,
-                analysis_time_ms=_int_environment(
+                player_mode=_enum_environment(
                     values,
-                    "WIZARD_CHESS_ENGINE_TIME_MS",
-                    defaults.engine.analysis_time_ms,
+                    "WIZARD_CHESS_STOCKFISH_PLAYER_MODE",
+                    StockfishPlayerMode,
+                    defaults.engine.player_mode,
+                ),
+                player_move_analysis_time_ms=_int_environment(
+                    values,
+                    "WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS",
+                    player_time_default,
+                    1,
+                ),
+                post_game_analysis_time_ms=_int_environment(
+                    values,
+                    "WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS",
+                    post_game_time_default,
                     1,
                 ),
                 analysis_depth=_optional_positive_int_environment(
@@ -254,6 +303,23 @@ class ApplicationSettings:
                     "WIZARD_CHESS_ENGINE_HASH_MB",
                     defaults.engine.hash_mb,
                     1,
+                ),
+                syzygy_path=(
+                    values["WIZARD_CHESS_SYZYGY_PATH"].strip() or None
+                    if "WIZARD_CHESS_SYZYGY_PATH" in values
+                    else defaults.engine.syzygy_path
+                ),
+                syzygy_probe_limit=_bounded_int_environment(
+                    values,
+                    "WIZARD_CHESS_SYZYGY_PROBE_LIMIT",
+                    defaults.engine.syzygy_probe_limit,
+                    0,
+                    7,
+                ),
+                syzygy_50_move_rule=_bool_environment(
+                    values,
+                    "WIZARD_CHESS_SYZYGY_50_MOVE_RULE",
+                    defaults.engine.syzygy_50_move_rule,
                 ),
             ),
             players=PlayerSettings(
@@ -285,6 +351,7 @@ class ApplicationSettings:
                     600.0,
                 ),
             ),
+            appearance=defaults.appearance,
             game_setup_saved=defaults.game_setup_saved,
             show_game_setup_on_startup=defaults.show_game_setup_on_startup,
             autosave=_bool_environment(values, "WIZARD_CHESS_AUTOSAVE", defaults.autosave),
@@ -299,6 +366,12 @@ GAME_SETUP_ENVIRONMENT_VARIABLES = frozenset(
         "WIZARD_CHESS_ENGINE_PATH",
         "WIZARD_CHESS_ANALYSIS_ENABLED",
         "WIZARD_CHESS_ENGINE_TIME_MS",
+        "WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS",
+        "WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS",
+        "WIZARD_CHESS_STOCKFISH_PLAYER_MODE",
+        "WIZARD_CHESS_SYZYGY_PATH",
+        "WIZARD_CHESS_SYZYGY_PROBE_LIMIT",
+        "WIZARD_CHESS_SYZYGY_50_MOVE_RULE",
         "WIZARD_CHESS_ENGINE_STRENGTH",
         "WIZARD_CHESS_WHITE_PLAYER",
         "WIZARD_CHESS_BLACK_PLAYER",
@@ -350,6 +423,20 @@ def _int_environment(values: Mapping[str, str], name: str, default: int, minimum
         return default
     if parsed < minimum:
         LOGGER.warning("Ignoring out-of-range %s=%r", name, value)
+        return default
+    return parsed
+
+
+def _bounded_int_environment(
+    values: Mapping[str, str],
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = _int_environment(values, name, default, minimum)
+    if parsed > maximum:
+        LOGGER.warning("Ignoring out-of-range %s=%r", name, values.get(name))
         return default
     return parsed
 

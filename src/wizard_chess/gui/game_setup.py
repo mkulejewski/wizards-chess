@@ -28,6 +28,7 @@ from wizard_chess.configuration import (
     EngineStrength,
     PlayerKind,
     PlayerSettings,
+    StockfishPlayerMode,
 )
 
 EngineAvailabilityCheck = Callable[[str | None], bool]
@@ -86,6 +87,15 @@ class GameSetupDialog(QDialog):
         self.think_time_spin.setDecimals(2)
         self.think_time_spin.setSingleStep(0.25)
         self.think_time_spin.setSuffix(" s")
+        self.player_mode_combo = QComboBox()
+        self.player_mode_combo.addItem(
+            "Fixed analysis time per move",
+            StockfishPlayerMode.FIXED_ANALYSIS_TIME.value,
+        )
+        self.player_mode_combo.addItem(
+            "Game-clock time management",
+            StockfishPlayerMode.GAME_CLOCK.value,
+        )
 
         self.clock_enabled_checkbox = QCheckBox("Use clock")
         self.initial_time_spin = QDoubleSpinBox()
@@ -129,7 +139,8 @@ class GameSetupDialog(QDialog):
         engine = replace(
             self._base_settings.engine,
             strength=strength,
-            analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
+            player_mode=StockfishPlayerMode(str(self.player_mode_combo.currentData())),
+            player_move_analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
         )
         clock = ClockSettings(
             enabled=self.clock_enabled_checkbox.isChecked(),
@@ -153,7 +164,10 @@ class GameSetupDialog(QDialog):
         self._base_settings = replace(self._base_settings, engine=settings.engine)
         strength_index = self.strength_combo.findData(settings.engine.strength.value)
         self.strength_combo.setCurrentIndex(max(0, strength_index))
-        self.think_time_spin.setValue(settings.engine.analysis_time_ms / 1000)
+        self.player_mode_combo.setCurrentIndex(
+            max(0, self.player_mode_combo.findData(settings.engine.player_mode.value))
+        )
+        self.think_time_spin.setValue(settings.engine.player_move_analysis_time_ms / 1000)
         self._update_engine_controls()
 
     def accept(self) -> None:
@@ -186,7 +200,8 @@ class GameSetupDialog(QDialog):
         self.engine_group = QGroupBox("Engine settings for this game")
         engine_form = QFormLayout(self.engine_group)
         engine_form.addRow("Strength:", self.strength_combo)
-        engine_form.addRow("Think time:", self.think_time_spin)
+        engine_form.addRow("Stockfish player mode:", self.player_mode_combo)
+        engine_form.addRow("Fixed bot analysis time:", self.think_time_spin)
         engine_form.addRow(self.engine_preferences_button)
         layout.addWidget(self.engine_group)
 
@@ -212,7 +227,10 @@ class GameSetupDialog(QDialog):
         self.black_name_edit.setText(settings.players.black_name)
         strength_index = self.strength_combo.findData(settings.engine.strength.value)
         self.strength_combo.setCurrentIndex(max(0, strength_index))
-        self.think_time_spin.setValue(settings.engine.analysis_time_ms / 1000)
+        self.player_mode_combo.setCurrentIndex(
+            max(0, self.player_mode_combo.findData(settings.engine.player_mode.value))
+        )
+        self.think_time_spin.setValue(settings.engine.player_move_analysis_time_ms / 1000)
         self.clock_enabled_checkbox.setChecked(settings.clock.enabled)
         self.initial_time_spin.setValue(settings.clock.initial_seconds)
         self.increment_spin.setValue(settings.clock.increment_seconds)
@@ -225,6 +243,7 @@ class GameSetupDialog(QDialog):
         self.preset_combo.currentIndexChanged.connect(self._apply_preset)
         self.white_player_combo.currentIndexChanged.connect(self._update_engine_controls)
         self.black_player_combo.currentIndexChanged.connect(self._update_engine_controls)
+        self.player_mode_combo.currentIndexChanged.connect(self._update_engine_controls)
         self.clock_enabled_checkbox.toggled.connect(self._update_clock_controls)
         self.remember_checkbox.toggled.connect(self._update_remember_controls)
         self.engine_preferences_button.clicked.connect(self.engine_preferences_requested)
@@ -240,8 +259,20 @@ class GameSetupDialog(QDialog):
 
     def _update_engine_controls(self) -> None:
         self.engine_group.setEnabled(self.requires_engine)
+        fixed_mode = (
+            self.player_mode_combo.currentData() == StockfishPlayerMode.FIXED_ANALYSIS_TIME.value
+        )
+        self.think_time_spin.setEnabled(self.requires_engine and fixed_mode)
+        self._update_clock_controls()
 
     def _update_clock_controls(self) -> None:
+        clock_managed_engine = (
+            self.requires_engine
+            and self.player_mode_combo.currentData() == StockfishPlayerMode.GAME_CLOCK.value
+        )
+        if clock_managed_engine:
+            self.clock_enabled_checkbox.setChecked(True)
+        self.clock_enabled_checkbox.setEnabled(not clock_managed_engine)
         enabled = self.clock_enabled_checkbox.isChecked()
         self.initial_time_spin.setEnabled(enabled)
         self.increment_spin.setEnabled(enabled)

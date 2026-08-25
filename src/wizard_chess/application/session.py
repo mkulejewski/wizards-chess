@@ -15,14 +15,16 @@ from wizard_chess.configuration import (
     ApplicationSettings,
     EngineSettings,
     PlayerKind,
+    StockfishPlayerMode,
     VoiceLanguage,
 )
-from wizard_chess.domain.events import MoveExecuted
+from wizard_chess.domain.events import MoveAnnotation, MoveExecuted
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.domain.results import GameResult, PlayerColor
 from wizard_chess.engine.base import ChessEngine
 from wizard_chess.engine.factory import create_stockfish_engine
+from wizard_chess.engine.models import EngineClockState, EngineDecision
 from wizard_chess.hardware.base import PhysicalBoard
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.localization import translate
@@ -59,6 +61,7 @@ class PositionSnapshot:
     can_redo: bool
     clock: ClockSnapshot | None = None
     viewed_ply: int | None = None
+    revision: int = 0
 
     def piece_at(self, square: str) -> str | None:
         """Return a FEN piece symbol at a square, if occupied."""
@@ -100,6 +103,7 @@ class GameSession:
         self._clock = clock or ChessClock(self.settings.clock)
         self._analysis_enabled = self.settings.engine.analysis_enabled
         self._last_feedback: str | None = None
+        self._revision = 0
 
     @property
     def game(self) -> ChessGame:
@@ -115,6 +119,11 @@ class GameSession:
         return self._analysis_enabled
 
     @property
+    def revision(self) -> int:
+        """Monotonic state token used to reject late asynchronous results."""
+        return self._revision
+
+    @property
     def voice_language(self) -> VoiceLanguage:
         return self._parser.language
 
@@ -125,6 +134,10 @@ class GameSession:
 
     def snapshot(self) -> PositionSnapshot:
         """Return all current read-only data needed by presentation adapters."""
+        self._adjudicate_timeout()
+        engine_name = getattr(self._engine, "engine_name", None)
+        if isinstance(engine_name, str) and engine_name and "Engine" not in self._game.metadata:
+            self._game.update_metadata(Engine=engine_name)
         return self._snapshot_for_game(self._game)
 
     def snapshot_at(self, ply: int) -> PositionSnapshot:
@@ -149,6 +162,7 @@ class GameSession:
             can_redo=snapshot.can_redo,
             clock=None,
             viewed_ply=ply,
+            revision=self._revision,
         )
 
     def _snapshot_for_game(self, game: ChessGame) -> PositionSnapshot:
@@ -175,6 +189,7 @@ class GameSession:
                 if game is self._game and self.settings.clock.enabled
                 else None
             ),
+            revision=self._revision,
         )
 
     def play_text(self, text: str) -> SessionResult:
@@ -194,11 +209,56 @@ class GameSession:
             self._last_feedback = result.message
         return result
 
-    def play_move(self, move: ChessMove) -> MoveExecuted:
+    def play_move(
+        self,
+        move: ChessMove,
+        *,
+        engine_decision: EngineDecision | None = None,
+    ) -> MoveExecuted:
         """Execute one direct/click move and emit the normal physical-board event."""
+        self._adjudicate_timeout()
+        mover = self._game.turn
         event = self._game.make_move(move)
         self._physical_board.execute_move(event)
-        self._clock.switch(self._game.turn)
+        timing = self._clock.switch(self._game.turn)
+        evaluation = engine_decision.evaluation if engine_decision is not None else None
+        annotation = MoveAnnotation(
+            elapsed_seconds=(
+                timing.elapsed_seconds
+                if timing is not None
+                else engine_decision.search_time_seconds
+                if engine_decision is not None
+                else None
+            ),
+            remaining_seconds=timing.remaining_seconds if timing is not None else None,
+            evaluation_cp=evaluation.score_cp if evaluation is not None else None,
+            mate_in=evaluation.mate_in if evaluation is not None else None,
+            depth=engine_decision.depth if engine_decision is not None else None,
+            nodes=engine_decision.nodes if engine_decision is not None else None,
+            tablebase_hits=(
+                engine_decision.tablebase_hits if engine_decision is not None else None
+            ),
+        )
+        if any(
+            value is not None
+            for value in (
+                annotation.elapsed_seconds,
+                annotation.remaining_seconds,
+                annotation.evaluation_cp,
+                annotation.mate_in,
+                annotation.depth,
+                annotation.nodes,
+                annotation.tablebase_hits,
+            )
+        ):
+            self._game.annotate_last_move(annotation)
+        if engine_decision is not None and engine_decision.engine_name:
+            player_engine_header = "WhiteEngine" if mover is PlayerColor.WHITE else "BlackEngine"
+            self._game.update_metadata(
+                Engine=engine_decision.engine_name,
+                **{player_engine_header: engine_decision.engine_name},
+            )
+        self._revision += 1
         self._autosave()
         LOGGER.info("Move executed: %s", event.uci)
         return event
@@ -207,6 +267,7 @@ class GameSession:
         """Undo through the authoritative domain history."""
         move = self._game.undo()
         self._clock.set_active(self._game.turn)
+        self._revision += 1
         self._autosave()
         return move
 
@@ -215,6 +276,7 @@ class GameSession:
         event = self._game.redo()
         self._physical_board.execute_move(event)
         self._clock.set_active(self._game.turn)
+        self._revision += 1
         self._autosave()
         return event
 
@@ -225,6 +287,7 @@ class GameSession:
             return
         self._game = self._new_configured_game()
         self._clock.reset(self._game.turn)
+        self._revision += 1
         self._last_feedback = None
         self._autosave()
         LOGGER.info("New game")
@@ -233,12 +296,7 @@ class GameSession:
         configured = settings.with_required_engine()
         replacement_engine = self._engine_factory(configured.engine)
         replacement_clock = ChessClock(configured.clock)
-        replacement_game = ChessGame(
-            metadata={
-                "White": configured.players.white_name,
-                "Black": configured.players.black_name,
-            }
-        )
+        replacement_game = ChessGame(metadata=self._game_metadata(configured))
 
         self._clock.pause()
         previous_engine = self._engine
@@ -249,6 +307,7 @@ class GameSession:
         self._game = replacement_game
         self._analysis_enabled = configured.engine.analysis_enabled
         self._last_feedback = None
+        self._revision += 1
         if previous_engine is not None:
             previous_engine.close()
         self._autosave()
@@ -258,6 +317,7 @@ class GameSession:
         """Load a validated position and clear its unavailable history."""
         self._game.load_fen(fen)
         self._clock.reset(self._game.turn)
+        self._revision += 1
         self._autosave()
 
     def load_pgn(self, pgn: str) -> None:
@@ -266,6 +326,7 @@ class GameSession:
         replacement.load_pgn(pgn)
         self._game = replacement
         self._clock.reset(self._game.turn)
+        self._revision += 1
         self._autosave()
 
     def save_game(self, destination: str | Path | None = None) -> Path:
@@ -282,10 +343,74 @@ class GameSession:
 
     def play_engine_move(self) -> MoveExecuted | None:
         """Request and centrally commit an engine move for the current position."""
-        if self._engine is None or self._game.is_game_over():
+        if self._engine is None or not self.prepare_engine_turn():
             return None
-        move = self._engine.play_move(self._game.board)
-        return self.play_move(move) if move is not None else None
+        source_fen = self._game.fen()
+        source_revision = self._revision
+        decision = self._engine.play_move(
+            self._game.board,
+            clock=self.engine_clock_state(),
+        )
+        if decision is None:
+            return None
+        if isinstance(decision, ChessMove):  # Compatibility with older engine adapters.
+            decision = EngineDecision(move=decision)
+        return self.commit_engine_decision(
+            decision,
+            expected_fen=source_fen,
+            expected_revision=source_revision,
+        )
+
+    def prepare_engine_turn(self) -> bool:
+        """Adjudicate and start timing before an engine worker is requested."""
+        self._adjudicate_timeout()
+        if self._game.is_game_over() or not self.engine_controls_turn():
+            return False
+        claimable = self._game.result()
+        if claimable.can_claim_draw:
+            self._game.claim_draw()
+            self._clock.pause()
+            self._revision += 1
+            self._autosave()
+            LOGGER.info("Stockfish claimed a draw: %s", self._game.result().status.value)
+            return False
+        if self.settings.engine.player_mode is StockfishPlayerMode.GAME_CLOCK:
+            self._clock.start(self._game.turn)
+        return True
+
+    def engine_clock_state(self) -> EngineClockState | None:
+        """Return the authoritative clock values for one clock-managed engine request."""
+        if self.settings.engine.player_mode is not StockfishPlayerMode.GAME_CLOCK:
+            return None
+        snapshot = self._clock.snapshot()
+        if not self.settings.clock.enabled:
+            return None
+        increment = self.settings.clock.increment_seconds
+        return EngineClockState(
+            white_seconds=snapshot.white_seconds,
+            black_seconds=snapshot.black_seconds,
+            white_increment_seconds=increment,
+            black_increment_seconds=increment,
+        )
+
+    def commit_engine_decision(
+        self,
+        decision: EngineDecision,
+        *,
+        expected_fen: str,
+        expected_revision: int,
+    ) -> MoveExecuted | None:
+        """Commit only a current, legal engine result from a non-flagged worker."""
+        self._adjudicate_timeout()
+        if (
+            expected_revision != self._revision
+            or expected_fen != self._game.fen()
+            or self._game.is_game_over()
+            or not self.engine_controls_turn()
+        ):
+            LOGGER.info("Ignored stale or terminal engine decision")
+            return None
+        return self.play_move(decision.move, engine_decision=decision)
 
     def engine_controls_turn(self) -> bool:
         players = self.settings.players
@@ -294,6 +419,8 @@ class GameSession:
 
     def start_clock(self) -> None:
         """Start or resume the optional clock for the authoritative side to move."""
+        if self._game.is_game_over():
+            return
         self._clock.start(self._game.turn)
 
     def pause_clock(self) -> None:
@@ -340,6 +467,7 @@ class GameSession:
         if command is CommandName.RESIGN:
             result = self._game.resign()
             self._clock.pause()
+            self._revision += 1
             self._autosave()
             winner = result.winner.value.title() if result.winner is not None else "Unknown"
             return SessionResult(
@@ -348,6 +476,7 @@ class GameSession:
         if command is CommandName.DRAW:
             self._game.agree_draw()
             self._clock.pause()
+            self._revision += 1
             self._autosave()
             return SessionResult(message=translate("session.draw", self.voice_language))
         if command is CommandName.SAVE:
@@ -377,10 +506,55 @@ class GameSession:
         except OSError:
             LOGGER.warning("Game autosave failed", exc_info=True)
 
+    def _adjudicate_timeout(self) -> None:
+        snapshot = self._clock.snapshot()
+        if snapshot.expired is None or self._game.is_game_over():
+            return
+        self._game.forfeit_on_time(snapshot.expired)
+        self._revision += 1
+        self._autosave()
+        LOGGER.info("Time forfeit: %s", snapshot.expired.value)
+
     def _new_configured_game(self) -> ChessGame:
-        return ChessGame(
-            metadata={
-                "White": self.settings.players.white_name,
-                "Black": self.settings.players.black_name,
-            }
-        )
+        return ChessGame(metadata=self._game_metadata(self.settings))
+
+    @staticmethod
+    def _game_metadata(settings: ApplicationSettings) -> dict[str, str]:
+        players = settings.players
+        engine = settings.engine
+        metadata = {
+            "White": players.white_name,
+            "Black": players.black_name,
+            "WhiteType": "Stockfish" if players.white_kind is PlayerKind.ENGINE else "Human",
+            "BlackType": "Stockfish" if players.black_kind is PlayerKind.ENGINE else "Human",
+        }
+        if settings.clock.enabled:
+            metadata["TimeControl"] = (
+                f"{_format_time_control(settings.clock.initial_seconds)}+"
+                f"{_format_time_control(settings.clock.increment_seconds)}"
+            )
+        if PlayerKind.ENGINE in {players.white_kind, players.black_kind}:
+            metadata.update(
+                {
+                    "EngineStrength": engine.strength.value,
+                    "EngineThreads": str(engine.threads),
+                    "EngineHashMB": str(engine.hash_mb),
+                    "StockfishPlayerMode": engine.player_mode.value,
+                }
+            )
+            if engine.player_mode is StockfishPlayerMode.FIXED_ANALYSIS_TIME:
+                metadata["PlayerMoveAnalysisTimeMs"] = str(engine.player_move_analysis_time_ms)
+            if engine.syzygy_path:
+                metadata.update(
+                    {
+                        "SyzygyPath": engine.syzygy_path,
+                        "SyzygyProbeLimit": str(engine.syzygy_probe_limit),
+                        "Syzygy50MoveRule": str(engine.syzygy_50_move_rule).lower(),
+                    }
+                )
+        return metadata
+
+
+def _format_time_control(seconds: float) -> str:
+    numeric = float(seconds)
+    return str(int(numeric)) if numeric.is_integer() else f"{numeric:g}"

@@ -33,6 +33,8 @@ Status meanings:
 | Stage 2.4 / Increment F — game analysis | Complete; manual acceptance pending | Immutable replay, FEN cache, before/after score, preferred move/PV, deterministic classification policy, ACPL/count statistics, versioned JSON, async GUI progress/summary. Real-Stockfish performance acceptance is pending. |
 | Stage 2.5 / Increment G — hardening/tooling | Complete | Configurable logging, controlled subsystem errors, scripted-game CLI through `GameSession`, fake engine and speech, autosave/schema defaults, graceful optional-component failure, integration coverage, Stage 3 event seam, updated documentation. |
 | Stage 2.7 — launch configuration and game setup | Complete; manual acceptance pending | XDG-persisted game/setup defaults, corrected default/persistent/environment precedence, first-run or automatic-reuse startup policy, Game Setup presets/player names/clocks/strength/think time, Engine Preferences path/validation/live/advanced controls, atomic `GameSession` reconfiguration, async engine-as-White coverage, headless CLI/script preservation. A real Stockfish handshake and offscreen async White move passed; interactive browse/save/relaunch acceptance remains pending. |
+| Board graphics | Complete | Additional graphics for the board and pieces |
+| Stockfish clock/adjudication and diagnostics hardening | Complete; real-tablebase acceptance pending | Explicit fifty-move and threefold claims with bot pre-adjudication and undo/redo/PGN restoration; fixed-time versus game-clock UCI play limits; authoritative clock debit, increment, timeout, cancellation, and revision-guarded late-result rejection; separate player/post-game budgets with schema-4 migration and environment/UI wiring; optional validated Syzygy options with normal-search fallback and hit diagnostics; structured engine decisions; enriched PGN player/engine/options/termination headers plus `%emt`, `%clk`, evaluation, depth, nodes, and tablebase-hit annotations; focused supplied-FEN, migration, limit, timeout, Syzygy, and PGN round-trip tests. Stockfish 16 returned legal moves in both fixed and clock-managed real-process acceptance checks. |
 
 ## Verification record
 
@@ -47,9 +49,9 @@ uv run pyright
 
 Final clean run on 2026-08-24:
 
-- `uv run pytest` — **282 passed**.
+- `uv run pytest` — **296 passed**.
 - `uv run ruff check .` — **passed**.
-- `uv run ruff format --check .` — **85 files already formatted**.
+- `uv run ruff format --check .` — **88 files already formatted**.
 - `uv run pyright` — **0 errors, 0 warnings**.
 - `uv run wizard-chess --script examples/game.txt` — completed Scholar's mate and produced
   the expected final FEN.

@@ -8,13 +8,17 @@ from pathlib import Path
 from typing import cast
 
 from wizard_chess.configuration import (
+    AppearanceSettings,
     ApplicationSettings,
+    BoardTheme,
     ClockSettings,
     ConfirmationPolicy,
     EngineSettings,
     EngineStrength,
+    PieceSet,
     PlayerKind,
     PlayerSettings,
+    StockfishPlayerMode,
     VoiceLanguage,
 )
 
@@ -22,7 +26,7 @@ from wizard_chess.configuration import (
 class SettingsStore:
     """Read current settings and tolerate missing fields from older schemas."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 4
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -45,6 +49,24 @@ class SettingsStore:
             engine = cast(dict[str, object], raw.get("engine", {}))
             players = cast(dict[str, object], raw.get("players", {}))
             clock = cast(dict[str, object], raw.get("clock", {}))
+            appearance = cast(dict[str, object], raw.get("appearance", {}))
+            legacy_analysis_time = engine.get("analysis_time_ms")
+            player_time_default = (
+                _int_value(
+                    legacy_analysis_time,
+                    fallback.engine.player_move_analysis_time_ms,
+                )
+                if legacy_analysis_time is not None
+                else fallback.engine.player_move_analysis_time_ms
+            )
+            post_game_time_default = (
+                _int_value(
+                    legacy_analysis_time,
+                    fallback.engine.post_game_analysis_time_ms,
+                )
+                if legacy_analysis_time is not None
+                else fallback.engine.post_game_analysis_time_ms
+            )
             return ApplicationSettings(
                 voice_language=VoiceLanguage(
                     str(raw.get("voice_language", fallback.voice_language))
@@ -61,8 +83,16 @@ class SettingsStore:
                     analysis_enabled=_bool_value(
                         engine.get("analysis_enabled"), fallback.engine.analysis_enabled
                     ),
-                    analysis_time_ms=_int_value(
-                        engine.get("analysis_time_ms"), fallback.engine.analysis_time_ms
+                    player_mode=StockfishPlayerMode(
+                        str(engine.get("player_mode", fallback.engine.player_mode))
+                    ),
+                    player_move_analysis_time_ms=_int_value(
+                        engine.get("player_move_analysis_time_ms"),
+                        player_time_default,
+                    ),
+                    post_game_analysis_time_ms=_int_value(
+                        engine.get("post_game_analysis_time_ms"),
+                        post_game_time_default,
                     ),
                     analysis_depth=_optional_int(
                         engine.get("analysis_depth", fallback.engine.analysis_depth)
@@ -71,6 +101,19 @@ class SettingsStore:
                     strength=EngineStrength(str(engine.get("strength", fallback.engine.strength))),
                     threads=_int_value(engine.get("threads"), fallback.engine.threads),
                     hash_mb=_int_value(engine.get("hash_mb"), fallback.engine.hash_mb),
+                    syzygy_path=_optional_string(
+                        engine.get("syzygy_path", fallback.engine.syzygy_path)
+                    ),
+                    syzygy_probe_limit=_bounded_int_value(
+                        engine.get("syzygy_probe_limit"),
+                        fallback.engine.syzygy_probe_limit,
+                        0,
+                        7,
+                    ),
+                    syzygy_50_move_rule=_bool_value(
+                        engine.get("syzygy_50_move_rule"),
+                        fallback.engine.syzygy_50_move_rule,
+                    ),
                 ),
                 players=PlayerSettings(
                     white_name=str(players.get("white_name", fallback.players.white_name)),
@@ -91,6 +134,14 @@ class SettingsStore:
                         clock.get("increment_seconds"), fallback.clock.increment_seconds
                     ),
                 ),
+                appearance=AppearanceSettings(
+                    piece_set=PieceSet(
+                        str(appearance.get("piece_set", fallback.appearance.piece_set))
+                    ),
+                    board_theme=BoardTheme(
+                        str(appearance.get("board_theme", fallback.appearance.board_theme))
+                    ),
+                ),
                 game_setup_saved=_bool_value(
                     raw.get("game_setup_saved"), fallback.game_setup_saved
                 ),
@@ -106,7 +157,10 @@ class SettingsStore:
 
 
 def _optional_string(value: object) -> str | None:
-    return None if value is None else str(value)
+    if value is None:
+        return None
+    rendered = str(value).strip()
+    return rendered or None
 
 
 def _optional_int(value: object) -> int | None:
@@ -117,6 +171,16 @@ def _int_value(value: object, default: int) -> int:
     if isinstance(value, (str, int, float)):
         return int(value)
     return default
+
+
+def _bounded_int_value(
+    value: object,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    parsed = _int_value(value, default)
+    return parsed if minimum <= parsed <= maximum else default
 
 
 def _bool_value(value: object, default: bool) -> bool:

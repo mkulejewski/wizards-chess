@@ -26,10 +26,16 @@ from PySide6.QtWidgets import (
 )
 
 from wizard_chess.application.session import GameSession, SessionResult
-from wizard_chess.configuration import ApplicationSettings, VoiceLanguage
+from wizard_chess.configuration import (
+    AppearanceSettings,
+    ApplicationSettings,
+    BoardTheme,
+    PieceSet,
+    VoiceLanguage,
+)
 from wizard_chess.domain.exceptions import WizardChessError
 from wizard_chess.domain.move import ChessMove
-from wizard_chess.engine.models import PositionAnalysis, evaluation_share
+from wizard_chess.engine.models import EngineDecision, PositionAnalysis, evaluation_share
 from wizard_chess.gui.analysis_worker import GameAnalysisWorker, format_game_analysis
 from wizard_chess.gui.board_widget import ChessBoardWidget
 from wizard_chess.gui.engine_preferences import EnginePreferencesDialog, EngineValidator
@@ -55,6 +61,17 @@ class MainWindow(QMainWindow):
         "Rook": "r",
         "Bishop": "b",
         "Knight": "n",
+    }
+    _PIECE_SET_LABELS: ClassVar[dict[PieceSet, str]] = {
+        PieceSet.TATIANA: "Tatiana",
+        PieceSet.CLASSIC_SYMBOLS: "Classic symbols",
+    }
+    _BOARD_THEME_LABELS: ClassVar[dict[BoardTheme, str]] = {
+        BoardTheme.WALNUT: "Walnut",
+        BoardTheme.BROWN: "Classic brown",
+        BoardTheme.GREEN: "Tournament green",
+        BoardTheme.BLUE: "Ocean blue",
+        BoardTheme.SLATE: "Midnight slate",
     }
 
     def __init__(
@@ -90,13 +107,14 @@ class MainWindow(QMainWindow):
         self._game_analysis_worker: GameAnalysisWorker | None = None
         self._engine_failed = False
         self._last_analysis_fen: str | None = None
+        self._timeout_refresh_revision: int | None = None
         self._closing = False
         self._viewed_ply: int | None = None
         self.interaction = BoardInteraction(self.session)
         self.setWindowTitle("Wizard Chess")
         self.resize(1040, 760)
 
-        self.board_widget = ChessBoardWidget()
+        self.board_widget = ChessBoardWidget(self._persistent_settings.appearance)
         self.history_view = QPlainTextEdit()
         self.history_view.setReadOnly(True)
         self.history_view.setPlaceholderText("Moves will appear here")
@@ -146,6 +164,22 @@ class MainWindow(QMainWindow):
         self.language_combo.addItem("Polski", VoiceLanguage.POLISH.value)
         language_index = self.language_combo.findData(self.session.voice_language.value)
         self.language_combo.setCurrentIndex(max(0, language_index))
+        self.piece_set_combo = QComboBox()
+        self.piece_set_combo.setAccessibleName("Piece set")
+        for piece_set, label in self._PIECE_SET_LABELS.items():
+            self.piece_set_combo.addItem(label, piece_set.value)
+        piece_set_index = self.piece_set_combo.findData(
+            self._persistent_settings.appearance.piece_set.value
+        )
+        self.piece_set_combo.setCurrentIndex(max(0, piece_set_index))
+        self.board_theme_combo = QComboBox()
+        self.board_theme_combo.setAccessibleName("Board look")
+        for board_theme, label in self._BOARD_THEME_LABELS.items():
+            self.board_theme_combo.addItem(label, board_theme.value)
+        board_theme_index = self.board_theme_combo.findData(
+            self._persistent_settings.appearance.board_theme.value
+        )
+        self.board_theme_combo.setCurrentIndex(max(0, board_theme_index))
 
         self._build_layout()
         self._connect_signals()
@@ -275,6 +309,18 @@ class MainWindow(QMainWindow):
         settings_layout.addLayout(clock_actions)
         side_layout.addWidget(settings_group)
 
+        appearance_group = QGroupBox("Board appearance")
+        appearance_layout = QVBoxLayout(appearance_group)
+        piece_set_row = QHBoxLayout()
+        piece_set_row.addWidget(QLabel("Pieces:"))
+        piece_set_row.addWidget(self.piece_set_combo, 1)
+        appearance_layout.addLayout(piece_set_row)
+        board_theme_row = QHBoxLayout()
+        board_theme_row.addWidget(QLabel("Board:"))
+        board_theme_row.addWidget(self.board_theme_combo, 1)
+        appearance_layout.addLayout(board_theme_row)
+        side_layout.addWidget(appearance_group)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.board_widget)
         splitter.addWidget(side_panel)
@@ -314,6 +360,8 @@ class MainWindow(QMainWindow):
         self.clock_button.clicked.connect(self._toggle_clock)
         self.reset_clock_button.clicked.connect(self._reset_clock)
         self.language_combo.currentIndexChanged.connect(self._change_language)
+        self.piece_set_combo.currentIndexChanged.connect(self._change_appearance)
+        self.board_theme_combo.currentIndexChanged.connect(self._change_appearance)
         self.history_slider.valueChanged.connect(self._view_history_position)
         self.live_position_button.clicked.connect(self._return_to_live_position)
         self.analyse_game_button.clicked.connect(self._start_game_analysis)
@@ -447,6 +495,8 @@ class MainWindow(QMainWindow):
         self.clock_button.setEnabled(enabled and self.session.settings.clock.enabled)
         self.reset_clock_button.setEnabled(enabled and self.session.settings.clock.enabled)
         self.language_combo.setEnabled(enabled)
+        self.piece_set_combo.setEnabled(enabled)
+        self.board_theme_combo.setEnabled(enabled)
         self.history_slider.setEnabled(enabled)
         self.live_position_button.setEnabled(enabled and self._viewed_ply is not None)
         self.analyse_game_button.setEnabled(enabled)
@@ -570,20 +620,27 @@ class MainWindow(QMainWindow):
 
     def _cancel_engine_activity(self) -> None:
         if self._engine_worker is not None and self._engine_worker.isRunning():
-            self._engine_worker.cancel()
+            self._engine_worker.cancel(stop_engine=True)
             self._engine_worker.wait()
         self._engine_worker = None
         if self._game_analysis_worker is not None and self._game_analysis_worker.isRunning():
-            self._game_analysis_worker.cancel()
+            self._game_analysis_worker.cancel(stop_engine=True)
             self._game_analysis_worker.wait()
         self._game_analysis_worker = None
 
+    def _cancel_move_worker(self) -> None:
+        if self._engine_worker is None or not self._engine_worker.isRunning():
+            return
+        self._engine_worker.cancel(stop_engine=True)
+
     def _undo(self) -> None:
+        self._cancel_move_worker()
         self._perform_state_action(
             lambda: f"Undid: {self.session.undo().uci()}",
         )
 
     def _redo(self) -> None:
+        self._cancel_move_worker()
         self._perform_state_action(
             lambda: f"Redid: {self.session.redo().san}",
         )
@@ -607,6 +664,7 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def _load_fen(self) -> None:
+        self._cancel_move_worker()
         try:
             self.session.load_fen(self.fen_input.text())
             self._viewed_ply = None
@@ -626,6 +684,7 @@ class MainWindow(QMainWindow):
         )
         if not source:
             return
+        self._cancel_move_worker()
         try:
             self.session.load_pgn(PgnStore().load(source))
             self._viewed_ply = None
@@ -673,6 +732,11 @@ class MainWindow(QMainWindow):
         self.clock_button.setText("Pause clock" if snapshot.running else "Start clock")
         self.clock_button.setEnabled(True)
         self.reset_clock_button.setEnabled(True)
+        if snapshot.expired is not None and self._timeout_refresh_revision != self.session.revision:
+            self._timeout_refresh_revision = self.session.revision
+            if self._engine_worker is not None and self._engine_worker.mode == "move":
+                self._engine_worker.cancel(stop_engine=True)
+            QTimer.singleShot(0, self.refresh)
 
     def _change_language(self, index: int) -> None:
         raw_language = self.language_combo.itemData(index)
@@ -696,6 +760,25 @@ class MainWindow(QMainWindow):
             error=False,
         )
 
+    def _change_appearance(self, _index: int) -> None:
+        raw_piece_set = self.piece_set_combo.currentData()
+        raw_board_theme = self.board_theme_combo.currentData()
+        if not isinstance(raw_piece_set, str) or not isinstance(raw_board_theme, str):
+            return
+        appearance = AppearanceSettings(
+            piece_set=PieceSet(raw_piece_set),
+            board_theme=BoardTheme(raw_board_theme),
+        )
+        self.board_widget.set_appearance(appearance)
+        self._save_preferences(replace(self._persistent_settings, appearance=appearance))
+        self._show_feedback(
+            (
+                f"Board appearance: {self._PIECE_SET_LABELS[appearance.piece_set]} pieces · "
+                f"{self._BOARD_THEME_LABELS[appearance.board_theme]} board."
+            ),
+            error=False,
+        )
+
     def _view_history_position(self, ply: int) -> None:
         live_ply = len(self.session.snapshot().move_history)
         self._viewed_ply = None if ply == live_ply else ply
@@ -715,7 +798,11 @@ class MainWindow(QMainWindow):
         if self._engine_worker is not None or self._game_analysis_worker is not None:
             self._show_feedback("The engine is already busy.")
             return
-        worker = GameAnalysisWorker(engine, self.session.snapshot().pgn)
+        worker = GameAnalysisWorker(
+            engine,
+            self.session.snapshot().pgn,
+            self.session.settings.engine.post_game_analysis_time_ms,
+        )
         self._game_analysis_worker = worker
         worker.progress.connect(self._on_game_analysis_progress)
         worker.succeeded.connect(self._on_game_analysis_success)
@@ -753,19 +840,32 @@ class MainWindow(QMainWindow):
                 self.engine_status_label.setText("Engine: Disabled (ordinary play is available)")
             return
         if self._engine_worker is not None:
-            if self._engine_worker.fen != fen:
-                self._engine_worker.cancel()
+            if (
+                self._engine_worker.fen != fen
+                or self._engine_worker.revision != self.session.revision
+            ):
+                self._engine_worker.cancel(stop_engine=True)
             return
 
         mode: str | None = None
         if self.session.engine_controls_turn() and not self.session.game.is_game_over():
-            mode = "move"
+            if self.session.prepare_engine_turn():
+                mode = "move"
+            else:
+                QTimer.singleShot(0, self.refresh)
+                return
         elif self.session.analysis_enabled and self._last_analysis_fen != fen:
             mode = "analysis"
         if mode is None:
             return
 
-        worker = EngineWorker(engine, self.session.game.board, mode)
+        worker = EngineWorker(
+            engine,
+            self.session.game.board,
+            mode,
+            revision=self.session.revision,
+            clock=self.session.engine_clock_state() if mode == "move" else None,
+        )
         self._engine_worker = worker
         worker.succeeded.connect(self._on_engine_success)
         worker.failed.connect(self._on_engine_failure)
@@ -778,16 +878,51 @@ class MainWindow(QMainWindow):
             self._set_interaction_enabled(False)
         worker.start()
 
-    def _on_engine_success(self, fen: str, mode: str, result: object) -> None:
-        if fen != self.session.snapshot().fen:
+    def _on_engine_success(
+        self,
+        fen: str,
+        revision: int,
+        mode: str,
+        result: object,
+    ) -> None:
+        if fen != self.session.snapshot().fen or revision != self.session.revision:
             return
         if mode == "move":
-            if isinstance(result, ChessMove):
+            decision = (
+                result
+                if isinstance(result, EngineDecision)
+                else EngineDecision(move=result)
+                if isinstance(result, ChessMove)
+                else None
+            )
+            if decision is not None:
                 try:
-                    event = self.session.play_move(result)
-                    self._viewed_ply = None
-                    self.interaction.clear_selection()
-                    self._show_feedback(f"Engine played: {event.san}", error=False)
+                    event = self.session.commit_engine_decision(
+                        decision,
+                        expected_fen=fen,
+                        expected_revision=revision,
+                    )
+                    if event is not None:
+                        self._viewed_ply = None
+                        self.interaction.clear_selection()
+                        tablebase = (
+                            f" · Syzygy hits: {decision.tablebase_hits}"
+                            if decision.tablebase_hits
+                            else ""
+                        )
+                        self._show_feedback(
+                            f"Engine played: {event.san}{tablebase}",
+                            error=False,
+                        )
+                        status = "Engine: Ready"
+                        syzygy_status = getattr(
+                            self.session.engine,
+                            "syzygy_status",
+                            "disabled",
+                        )
+                        if isinstance(syzygy_status, str) and syzygy_status != "disabled":
+                            status += f" · Syzygy {syzygy_status}"
+                        self.engine_status_label.setText(status)
                 except WizardChessError as error:
                     self._show_feedback(str(error))
             return
@@ -795,8 +930,14 @@ class MainWindow(QMainWindow):
             self._last_analysis_fen = fen
             self._render_engine_analysis(result)
 
-    def _on_engine_failure(self, fen: str, mode: str, error: object) -> None:
-        del fen, mode
+    def _on_engine_failure(
+        self,
+        fen: str,
+        revision: int,
+        mode: str,
+        error: object,
+    ) -> None:
+        del fen, revision, mode
         self._engine_failed = True
         self.engine_status_label.setText(
             f"Engine unavailable: {error}. Ordinary chess remains available."
@@ -804,7 +945,9 @@ class MainWindow(QMainWindow):
         self.evaluation_bar.setFormat("Evaluation: unavailable")
 
     def _on_engine_finished(self) -> None:
-        self._engine_worker = None
+        worker = self.sender()
+        if worker is self._engine_worker:
+            self._engine_worker = None
         self._set_interaction_enabled(True)
         self.refresh()
 
@@ -816,7 +959,14 @@ class MainWindow(QMainWindow):
             )
             self.analysis_view.clear()
             return
-        self.engine_status_label.setText("Engine: Ready")
+        tablebase_hits = sum(line.tablebase_hits or 0 for line in analysis.lines)
+        status = (
+            f"Engine: Ready · Syzygy hits {tablebase_hits}" if tablebase_hits else "Engine: Ready"
+        )
+        syzygy_status = getattr(self.session.engine, "syzygy_status", "disabled")
+        if isinstance(syzygy_status, str) and syzygy_status != "disabled":
+            status += f" · Syzygy {syzygy_status}"
+        self.engine_status_label.setText(status)
         self.evaluation_bar.setValue(round(evaluation_share(best.evaluation) * 1000))
         self.evaluation_bar.setFormat(f"Evaluation: {best.evaluation.display()}")
         board = self.session.game.board
@@ -848,10 +998,10 @@ class MainWindow(QMainWindow):
             self._voice_worker.cancel()
             self._voice_worker.wait()
         if self._engine_worker is not None and self._engine_worker.isRunning():
-            self._engine_worker.cancel()
+            self._engine_worker.cancel(stop_engine=True)
             self._engine_worker.wait()
         if self._game_analysis_worker is not None and self._game_analysis_worker.isRunning():
-            self._game_analysis_worker.cancel()
+            self._game_analysis_worker.cancel(stop_engine=True)
             self._game_analysis_worker.wait()
         self.session.close()
         event.accept()

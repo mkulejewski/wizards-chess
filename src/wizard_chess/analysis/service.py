@@ -31,9 +31,12 @@ class AnalysisService:
         self,
         engine: ChessEngine,
         policy: ClassificationPolicy | None = None,
+        *,
+        analysis_time_ms: int | None = None,
     ) -> None:
         self._engine = engine
         self._policy = policy or ClassificationPolicy()
+        self._analysis_time_ms = analysis_time_ms
         self._cache: dict[str, PositionAnalysis] = {}
 
     def analyse_game(
@@ -104,6 +107,7 @@ class AnalysisService:
         analysis = self._engine.analyse_position(
             board.copy(stack=False),
             count=1,
+            time_ms=self._analysis_time_ms,
             cancel_requested=cancellation,
         )
         self._cache[fen] = analysis
