@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
 from wizard_chess.configuration import (
     ApplicationSettings,
     ClockSettings,
+    EngineAnalysisMode,
     EngineStrength,
     PlayerKind,
     PlayerSettings,
@@ -96,6 +98,12 @@ class GameSetupDialog(QDialog):
             "Game-clock time management",
             StockfishPlayerMode.GAME_CLOCK.value,
         )
+        self.analysis_mode_combo = QComboBox()
+        self.analysis_mode_combo.addItem("Disabled", EngineAnalysisMode.OFF.value)
+        self.analysis_mode_combo.addItem("Fixed time", EngineAnalysisMode.FIXED_TIME.value)
+        self.analysis_mode_combo.addItem("Continuous live", EngineAnalysisMode.LIVE.value)
+        self.live_depth_spin = QSpinBox()
+        self.live_depth_spin.setRange(1, 100)
 
         self.clock_enabled_checkbox = QCheckBox("Use clock")
         self.initial_time_spin = QDoubleSpinBox()
@@ -122,7 +130,8 @@ class GameSetupDialog(QDialog):
     def requires_engine(self) -> bool:
         """Return whether a selected player or live analysis requires Stockfish."""
         return (
-            self._base_settings.engine.analysis_enabled
+            EngineAnalysisMode(str(self.analysis_mode_combo.currentData()))
+            is not EngineAnalysisMode.OFF
             or self._player_kind(self.white_player_combo) is PlayerKind.ENGINE
             or self._player_kind(self.black_player_combo) is PlayerKind.ENGINE
         )
@@ -136,9 +145,13 @@ class GameSetupDialog(QDialog):
             black_kind=self._player_kind(self.black_player_combo),
         )
         strength = EngineStrength(str(self.strength_combo.currentData()))
+        analysis_mode = EngineAnalysisMode(str(self.analysis_mode_combo.currentData()))
         engine = replace(
             self._base_settings.engine,
             strength=strength,
+            analysis_mode=analysis_mode,
+            analysis_enabled=analysis_mode is not EngineAnalysisMode.OFF,
+            live_analysis_max_depth=self.live_depth_spin.value(),
             player_mode=StockfishPlayerMode(str(self.player_mode_combo.currentData())),
             player_move_analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
         )
@@ -168,6 +181,10 @@ class GameSetupDialog(QDialog):
             max(0, self.player_mode_combo.findData(settings.engine.player_mode.value))
         )
         self.think_time_spin.setValue(settings.engine.player_move_analysis_time_ms / 1000)
+        self.analysis_mode_combo.setCurrentIndex(
+            max(0, self.analysis_mode_combo.findData(settings.engine.analysis_mode.value))
+        )
+        self.live_depth_spin.setValue(settings.engine.live_analysis_max_depth)
         self._update_engine_controls()
 
     def accept(self) -> None:
@@ -202,8 +219,14 @@ class GameSetupDialog(QDialog):
         engine_form.addRow("Strength:", self.strength_combo)
         engine_form.addRow("Stockfish player mode:", self.player_mode_combo)
         engine_form.addRow("Fixed bot analysis time:", self.think_time_spin)
-        engine_form.addRow(self.engine_preferences_button)
         layout.addWidget(self.engine_group)
+
+        analysis_group = QGroupBox("Displayed-position analysis")
+        analysis_form = QFormLayout(analysis_group)
+        analysis_form.addRow("Mode:", self.analysis_mode_combo)
+        analysis_form.addRow("Live maximum depth:", self.live_depth_spin)
+        analysis_form.addRow(self.engine_preferences_button)
+        layout.addWidget(analysis_group)
 
         clock_group = QGroupBox("Clock")
         clock_form = QFormLayout(clock_group)
@@ -231,6 +254,10 @@ class GameSetupDialog(QDialog):
             max(0, self.player_mode_combo.findData(settings.engine.player_mode.value))
         )
         self.think_time_spin.setValue(settings.engine.player_move_analysis_time_ms / 1000)
+        self.analysis_mode_combo.setCurrentIndex(
+            max(0, self.analysis_mode_combo.findData(settings.engine.analysis_mode.value))
+        )
+        self.live_depth_spin.setValue(settings.engine.live_analysis_max_depth)
         self.clock_enabled_checkbox.setChecked(settings.clock.enabled)
         self.initial_time_spin.setValue(settings.clock.initial_seconds)
         self.increment_spin.setValue(settings.clock.increment_seconds)
@@ -244,6 +271,7 @@ class GameSetupDialog(QDialog):
         self.white_player_combo.currentIndexChanged.connect(self._update_engine_controls)
         self.black_player_combo.currentIndexChanged.connect(self._update_engine_controls)
         self.player_mode_combo.currentIndexChanged.connect(self._update_engine_controls)
+        self.analysis_mode_combo.currentIndexChanged.connect(self._update_engine_controls)
         self.clock_enabled_checkbox.toggled.connect(self._update_clock_controls)
         self.remember_checkbox.toggled.connect(self._update_remember_controls)
         self.engine_preferences_button.clicked.connect(self.engine_preferences_requested)
@@ -258,16 +286,20 @@ class GameSetupDialog(QDialog):
         _select_player(self.black_player_combo, black)
 
     def _update_engine_controls(self) -> None:
-        self.engine_group.setEnabled(self.requires_engine)
+        player_engine = self._engine_player_selected()
+        self.engine_group.setEnabled(player_engine)
         fixed_mode = (
             self.player_mode_combo.currentData() == StockfishPlayerMode.FIXED_ANALYSIS_TIME.value
         )
-        self.think_time_spin.setEnabled(self.requires_engine and fixed_mode)
+        self.think_time_spin.setEnabled(player_engine and fixed_mode)
+        self.live_depth_spin.setEnabled(
+            self.analysis_mode_combo.currentData() == EngineAnalysisMode.LIVE.value
+        )
         self._update_clock_controls()
 
     def _update_clock_controls(self) -> None:
         clock_managed_engine = (
-            self.requires_engine
+            self._engine_player_selected()
             and self.player_mode_combo.currentData() == StockfishPlayerMode.GAME_CLOCK.value
         )
         if clock_managed_engine:
@@ -286,6 +318,12 @@ class GameSetupDialog(QDialog):
     @staticmethod
     def _player_kind(combo: QComboBox) -> PlayerKind:
         return PlayerKind(str(combo.currentData()))
+
+    def _engine_player_selected(self) -> bool:
+        return (
+            self._player_kind(self.white_player_combo) is PlayerKind.ENGINE
+            or self._player_kind(self.black_player_combo) is PlayerKind.ENGINE
+        )
 
 
 def _player_combo() -> QComboBox:

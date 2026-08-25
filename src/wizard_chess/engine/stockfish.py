@@ -17,7 +17,7 @@ from wizard_chess.domain.exceptions import (
     EngineUnavailableError,
 )
 from wizard_chess.domain.move import ChessMove
-from wizard_chess.engine.base import CancellationCheck
+from wizard_chess.engine.base import AnalysisUpdate, CancellationCheck
 from wizard_chess.engine.models import (
     EngineClockState,
     EngineDecision,
@@ -145,6 +145,64 @@ class StockfishEngine:
 
     def get_top_moves(self, board: chess.Board, count: int = 3) -> tuple[ChessMove, ...]:
         return tuple(line.move for line in self.analyse_position(board, count=count).lines)
+
+    def analyse_live(
+        self,
+        board: chess.Board,
+        *,
+        max_depth: int,
+        on_update: AnalysisUpdate,
+        cancel_requested: CancellationCheck | None = None,
+    ) -> None:
+        """Stream progressively deeper UCI information from one continuous search."""
+        if max_depth <= 0:
+            raise ValueError("Live analysis maximum depth must be positive")
+        cancellation = cancel_requested or (lambda: False)
+        if cancellation():
+            raise AnalysisCancelledError("Live engine analysis was cancelled")
+        position = board.copy(stack=True)
+        fen = position.fen()
+        if position.is_game_over(claim_draw=False):
+            return
+        self.start()
+        engine = self._require_engine()
+        deepest = -1
+        useful_update_seen = False
+        try:
+            with engine.analysis(
+                position,
+                chess.engine.Limit(depth=max_depth),
+                multipv=1,
+                info=chess.engine.INFO_ALL,
+            ) as stream:
+                for info in stream:
+                    if cancellation():
+                        break
+                    depth = _optional_int_info(info, "depth")
+                    if depth is None or depth <= deepest:
+                        continue
+                    try:
+                        line = self._normalize_info(position, info)
+                    except EngineCrashedError:
+                        continue
+                    on_update(PositionAnalysis(fen=fen, lines=(line,)))
+                    useful_update_seen = True
+                    deepest = depth
+                    if depth >= max_depth:
+                        break
+        except (chess.engine.EngineTerminatedError, BrokenPipeError) as error:
+            self._engine = None
+            if cancellation():
+                raise AnalysisCancelledError("Live engine analysis was cancelled") from error
+            raise EngineCrashedError("The chess engine stopped during live analysis") from error
+        except chess.engine.EngineError as error:
+            if cancellation():
+                raise AnalysisCancelledError("Live engine analysis was cancelled") from error
+            raise EngineCrashedError("The chess engine could not stream analysis") from error
+        if cancellation():
+            raise AnalysisCancelledError("Live engine analysis was cancelled")
+        if not useful_update_seen:
+            raise EngineCrashedError("The chess engine returned no usable live analysis")
 
     def play_move(
         self,

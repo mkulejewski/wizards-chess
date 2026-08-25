@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import ClassVar, cast
 
+import chess
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
@@ -17,7 +18,6 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPlainTextEdit,
-    QProgressBar,
     QPushButton,
     QSlider,
     QSplitter,
@@ -25,23 +25,33 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from wizard_chess.application.session import GameSession, SessionResult
+from wizard_chess.analysis.live import AnalysisSelection, LiveAnalysisResult
+from wizard_chess.analysis.models import GameAnalysis
+from wizard_chess.application.session import GameSession, PositionSnapshot, SessionResult
 from wizard_chess.configuration import (
     AppearanceSettings,
     ApplicationSettings,
     BoardTheme,
+    EngineAnalysisMode,
     PieceSet,
     VoiceLanguage,
 )
 from wizard_chess.domain.exceptions import WizardChessError
 from wizard_chess.domain.move import ChessMove
-from wizard_chess.engine.models import EngineDecision, PositionAnalysis, evaluation_share
+from wizard_chess.engine.base import ChessEngine
+from wizard_chess.engine.models import EngineDecision, PositionAnalysis
 from wizard_chess.gui.analysis_worker import GameAnalysisWorker, format_game_analysis
 from wizard_chess.gui.board_widget import ChessBoardWidget
 from wizard_chess.gui.engine_preferences import EnginePreferencesDialog, EngineValidator
 from wizard_chess.gui.engine_worker import EngineWorker
+from wizard_chess.gui.evaluation_widgets import (
+    EvaluationGraph,
+    EvaluationSidebar,
+    game_analysis_evaluations,
+)
 from wizard_chess.gui.game_setup import GameSetupDialog
 from wizard_chess.gui.interaction import BoardInteraction, ClickResult
+from wizard_chess.gui.live_analysis_worker import LiveAnalysisWorker
 from wizard_chess.gui.view_model import format_game_status, format_move_history
 from wizard_chess.gui.voice_worker import VoiceWorker
 from wizard_chess.persistence.pgn_store import PgnStore
@@ -104,9 +114,11 @@ class MainWindow(QMainWindow):
         )
         self._voice_worker: VoiceWorker | None = None
         self._engine_worker: EngineWorker | None = None
+        self._live_analysis_worker: LiveAnalysisWorker | None = None
         self._game_analysis_worker: GameAnalysisWorker | None = None
+        self._completed_game_analysis: GameAnalysis | None = None
         self._engine_failed = False
-        self._last_analysis_fen: str | None = None
+        self._analysis_failed = False
         self._timeout_refresh_revision: int | None = None
         self._closing = False
         self._viewed_ply: int | None = None
@@ -141,10 +153,9 @@ class MainWindow(QMainWindow):
         self.export_pgn_button = QPushButton("Export PGN")
         self.engine_status_label = QLabel("Engine: Disabled")
         self.engine_status_label.setWordWrap(True)
-        self.evaluation_bar = QProgressBar()
-        self.evaluation_bar.setRange(0, 1000)
-        self.evaluation_bar.setValue(500)
-        self.evaluation_bar.setFormat("Evaluation: —")
+        self.evaluation_bar = EvaluationSidebar()
+        self.evaluation_graph = EvaluationGraph()
+        self.evaluation_graph.setVisible(False)
         self.analysis_view = QPlainTextEdit()
         self.analysis_view.setReadOnly(True)
         self.analysis_view.setMaximumHeight(150)
@@ -212,6 +223,11 @@ class MainWindow(QMainWindow):
     def refresh(self) -> None:
         """Rerender every stateful view from the authoritative session."""
         live_snapshot = self.session.snapshot()
+        if (
+            self._completed_game_analysis is not None
+            and self._completed_game_analysis.source_pgn != live_snapshot.pgn
+        ):
+            self._completed_game_analysis = None
         snapshot = (
             self.session.snapshot_at(self._viewed_ply)
             if self._viewed_ply is not None
@@ -251,7 +267,24 @@ class MainWindow(QMainWindow):
         )
         self.live_position_button.setEnabled(self._viewed_ply is not None)
         self._refresh_clock()
-        self._request_engine_work(live_snapshot.fen)
+        displayed_ply = (
+            self._viewed_ply if self._viewed_ply is not None else len(live_snapshot.move_history)
+        )
+        selection = self.session.live_analysis.select(snapshot.fen, displayed_ply)
+        displayed_board = chess.Board(snapshot.fen)
+        if displayed_board.is_game_over(claim_draw=False):
+            self.session.live_analysis.store_terminal(selection, displayed_board)
+        cached = self.session.live_analysis.cache.get_best(selection.position_id)
+        if cached is not None:
+            self._render_live_result(cached)
+        elif self.session.analysis_mode is EngineAnalysisMode.OFF:
+            self.evaluation_bar.clear("off")
+        else:
+            self.evaluation_bar.clear()
+            if not self._game_analysis_report_is_current():
+                self.analysis_view.clear()
+        self._refresh_evaluation_graph(live_snapshot, displayed_ply)
+        self._request_engine_work(live_snapshot, snapshot, selection)
 
     def _build_layout(self) -> None:
         central = QWidget()
@@ -321,8 +354,18 @@ class MainWindow(QMainWindow):
         appearance_layout.addLayout(board_theme_row)
         side_layout.addWidget(appearance_group)
 
+        board_panel = QWidget()
+        board_layout = QVBoxLayout(board_panel)
+        board_layout.setContentsMargins(0, 0, 0, 0)
+        board_row = QHBoxLayout()
+        board_row.setContentsMargins(0, 0, 0, 0)
+        board_row.addWidget(self.board_widget, 1)
+        board_row.addWidget(self.evaluation_bar)
+        board_layout.addLayout(board_row, 1)
+        board_layout.addWidget(self.evaluation_graph)
+
         splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self.board_widget)
+        splitter.addWidget(board_panel)
         splitter.addWidget(side_panel)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
@@ -365,6 +408,7 @@ class MainWindow(QMainWindow):
         self.history_slider.valueChanged.connect(self._view_history_position)
         self.live_position_button.clicked.connect(self._return_to_live_position)
         self.analyse_game_button.clicked.connect(self._start_game_analysis)
+        self.evaluation_graph.ply_selected.connect(self.history_slider.setValue)
 
     def _on_board_square(self, square: str) -> None:
         try:
@@ -547,7 +591,7 @@ class MainWindow(QMainWindow):
         self._cancel_engine_activity()
         self.session.new_game(effective)
         self._engine_failed = False
-        self._last_analysis_fen = None
+        self._analysis_failed = False
         self._viewed_ply = None
         self.interaction.clear_selection()
         self._startup_setup_pending = False
@@ -619,6 +663,10 @@ class MainWindow(QMainWindow):
         return resolve_stockfish_path(path) is not None
 
     def _cancel_engine_activity(self) -> None:
+        if self._live_analysis_worker is not None and self._live_analysis_worker.isRunning():
+            self._live_analysis_worker.cancel(stop_engine=True)
+            self._live_analysis_worker.wait()
+        self._live_analysis_worker = None
         if self._engine_worker is not None and self._engine_worker.isRunning():
             self._engine_worker.cancel(stop_engine=True)
             self._engine_worker.wait()
@@ -629,6 +677,8 @@ class MainWindow(QMainWindow):
         self._game_analysis_worker = None
 
     def _cancel_move_worker(self) -> None:
+        if self._live_analysis_worker is not None and self._live_analysis_worker.isRunning():
+            self._live_analysis_worker.cancel()
         if self._engine_worker is None or not self._engine_worker.isRunning():
             return
         self._engine_worker.cancel(stop_engine=True)
@@ -795,7 +845,11 @@ class MainWindow(QMainWindow):
         if engine is None or self._engine_failed:
             self._show_feedback("Configure Stockfish before analysing a game.")
             return
-        if self._engine_worker is not None or self._game_analysis_worker is not None:
+        if (
+            self._engine_worker is not None
+            or self._live_analysis_worker is not None
+            or self._game_analysis_worker is not None
+        ):
             self._show_feedback("The engine is already busy.")
             return
         worker = GameAnalysisWorker(
@@ -803,6 +857,8 @@ class MainWindow(QMainWindow):
             self.session.snapshot().pgn,
             self.session.settings.engine.post_game_analysis_time_ms,
         )
+        self._completed_game_analysis = None
+        self.evaluation_graph.setVisible(False)
         self._game_analysis_worker = worker
         worker.progress.connect(self._on_game_analysis_progress)
         worker.succeeded.connect(self._on_game_analysis_success)
@@ -817,13 +873,25 @@ class MainWindow(QMainWindow):
         self.engine_status_label.setText(f"Engine: Analysing game {completed}/{total}")
 
     def _on_game_analysis_success(self, result: object) -> None:
-        from wizard_chess.analysis.models import GameAnalysis
-
         if isinstance(result, GameAnalysis):
+            if result.source_pgn != self.session.snapshot().pgn:
+                self._completed_game_analysis = None
+                self.engine_status_label.setText("Game analysis is obsolete; the game changed")
+                self.evaluation_graph.setVisible(False)
+                return
+            self._completed_game_analysis = result
             self.engine_status_label.setText("Engine: Game analysis complete")
             self.analysis_view.setPlainText(format_game_analysis(result))
+            current_ply = (
+                self._viewed_ply
+                if self._viewed_ply is not None
+                else len(self.session.snapshot().move_history)
+            )
+            self._refresh_evaluation_graph(self.session.snapshot(), current_ply)
 
     def _on_game_analysis_failure(self, error: object) -> None:
+        self._completed_game_analysis = None
+        self.evaluation_graph.setVisible(False)
         self.engine_status_label.setText(f"Game analysis failed: {error}")
 
     def _on_game_analysis_finished(self) -> None:
@@ -831,37 +899,68 @@ class MainWindow(QMainWindow):
         self._set_interaction_enabled(True)
         self.refresh()
 
-    def _request_engine_work(self, fen: str) -> None:
+    def _request_engine_work(
+        self,
+        live_snapshot: PositionSnapshot,
+        displayed_snapshot: PositionSnapshot,
+        selection: AnalysisSelection,
+    ) -> None:
         engine = self.session.engine
         if self._startup_setup_pending:
             return
-        if self._closing or engine is None or self._engine_failed:
+        if self._closing or engine is None:
             if engine is None:
                 self.engine_status_label.setText("Engine: Disabled (ordinary play is available)")
             return
+        if self._live_analysis_worker is not None:
+            if self._live_analysis_worker.generation != selection.generation:
+                self._live_analysis_worker.cancel()
+            return
         if self._engine_worker is not None:
+            expected_fen = (
+                live_snapshot.fen if self._engine_worker.mode == "move" else displayed_snapshot.fen
+            )
             if (
-                self._engine_worker.fen != fen
+                self._engine_worker.fen != expected_fen
                 or self._engine_worker.revision != self.session.revision
             ):
                 self._engine_worker.cancel(stop_engine=True)
             return
+        if self._game_analysis_worker is not None:
+            return
 
         mode: str | None = None
+        board = chess.Board(displayed_snapshot.fen)
         if self.session.engine_controls_turn() and not self.session.game.is_game_over():
+            if self._engine_failed:
+                return
             if self.session.prepare_engine_turn():
                 mode = "move"
+                board = self.session.game.board
             else:
                 QTimer.singleShot(0, self.refresh)
                 return
-        elif self.session.analysis_enabled and self._last_analysis_fen != fen:
+        elif (
+            not self._analysis_failed
+            and not board.is_game_over(claim_draw=False)
+            and self.session.analysis_mode is EngineAnalysisMode.FIXED_TIME
+            and self.session.live_analysis.needs_fixed_analysis(selection)
+        ):
             mode = "analysis"
+        elif (
+            not self._analysis_failed
+            and not board.is_game_over(claim_draw=False)
+            and self.session.analysis_mode is EngineAnalysisMode.LIVE
+            and self.session.live_analysis.needs_live_analysis(selection)
+        ):
+            self._start_live_analysis(engine, board, selection)
+            return
         if mode is None:
             return
 
         worker = EngineWorker(
             engine,
-            self.session.game.board,
+            board,
             mode,
             revision=self.session.revision,
             clock=self.session.engine_clock_state() if mode == "move" else None,
@@ -876,6 +975,29 @@ class MainWindow(QMainWindow):
         )
         if mode == "move":
             self._set_interaction_enabled(False)
+            # Undo remains a safe escape hatch: it cancels this worker first,
+            # and session revision/FEN guards reject any already-queued result.
+            self.undo_button.setEnabled(self.session.snapshot().can_undo)
+        worker.start()
+
+    def _start_live_analysis(
+        self,
+        engine: ChessEngine,
+        board: chess.Board,
+        selection: AnalysisSelection,
+    ) -> None:
+        worker = LiveAnalysisWorker(
+            engine,
+            board,
+            selection,
+            self.session.settings.engine.live_analysis_max_depth,
+        )
+        self._live_analysis_worker = worker
+        worker.updated.connect(self._on_live_analysis_update)
+        worker.failed.connect(self._on_live_analysis_failure)
+        worker.finished.connect(self._on_live_analysis_finished)
+        worker.finished.connect(worker.deleteLater)
+        self.engine_status_label.setText(f"Engine: Live analysis · target depth {worker.max_depth}")
         worker.start()
 
     def _on_engine_success(
@@ -885,9 +1007,9 @@ class MainWindow(QMainWindow):
         mode: str,
         result: object,
     ) -> None:
-        if fen != self.session.snapshot().fen or revision != self.session.revision:
-            return
         if mode == "move":
+            if fen != self.session.snapshot().fen or revision != self.session.revision:
+                return
             decision = (
                 result
                 if isinstance(result, EngineDecision)
@@ -927,8 +1049,15 @@ class MainWindow(QMainWindow):
                     self._show_feedback(str(error))
             return
         if isinstance(result, PositionAnalysis):
-            self._last_analysis_fen = fen
-            self._render_engine_analysis(result)
+            selection = self.session.live_analysis.selection
+            if selection is None or selection.fen != fen or revision != self.session.revision:
+                return
+            live_result = self.session.live_analysis.make_result(selection, result)
+            self.session.live_analysis.mark_fixed_complete(selection.position_id)
+            if live_result is not None and self.session.live_analysis.accept(
+                selection.generation, live_result
+            ):
+                self._render_engine_analysis(result, live_result)
 
     def _on_engine_failure(
         self,
@@ -937,12 +1066,15 @@ class MainWindow(QMainWindow):
         mode: str,
         error: object,
     ) -> None:
-        del fen, revision, mode
-        self._engine_failed = True
+        del fen, revision
+        if mode == "analysis":
+            self._analysis_failed = True
+        else:
+            self._engine_failed = True
         self.engine_status_label.setText(
             f"Engine unavailable: {error}. Ordinary chess remains available."
         )
-        self.evaluation_bar.setFormat("Evaluation: unavailable")
+        self.evaluation_bar.set_unavailable()
 
     def _on_engine_finished(self) -> None:
         worker = self.sender()
@@ -951,13 +1083,67 @@ class MainWindow(QMainWindow):
         self._set_interaction_enabled(True)
         self.refresh()
 
-    def _render_engine_analysis(self, analysis: PositionAnalysis) -> None:
+    def _on_live_analysis_update(
+        self,
+        fen: str,
+        generation: int,
+        update: object,
+    ) -> None:
+        selection = self.session.live_analysis.selection
+        if (
+            selection is None
+            or selection.generation != generation
+            or selection.fen != fen
+            or not isinstance(update, PositionAnalysis)
+        ):
+            return
+        result = self.session.live_analysis.make_result(selection, update)
+        if result is None or not self.session.live_analysis.accept(generation, result):
+            return
+        self._render_engine_analysis(update, result, live=True)
+
+    def _on_live_analysis_failure(
+        self,
+        fen: str,
+        generation: int,
+        error: object,
+    ) -> None:
+        selection = self.session.live_analysis.selection
+        if selection is None or selection.generation != generation or selection.fen != fen:
+            return
+        self._analysis_failed = True
+        self.engine_status_label.setText(
+            f"Analysis unavailable: {error}. Ordinary chess remains available."
+        )
+        if self.session.live_analysis.cache.get_best(selection.position_id) is None:
+            self.evaluation_bar.set_unavailable()
+
+    def _on_live_analysis_finished(self) -> None:
+        worker = self.sender()
+        if isinstance(worker, LiveAnalysisWorker) and worker is self._live_analysis_worker:
+            cancelled = worker.selection.generation != (
+                self.session.live_analysis.selection.generation
+                if self.session.live_analysis.selection is not None
+                else -1
+            )
+            self._live_analysis_worker = None
+            if cancelled:
+                QTimer.singleShot(0, self.refresh)
+
+    def _render_engine_analysis(
+        self,
+        analysis: PositionAnalysis,
+        result: LiveAnalysisResult,
+        *,
+        live: bool = False,
+    ) -> None:
         best = analysis.best_line
         if best is None:
             self.engine_status_label.setText(
                 "Engine: Terminal position" if analysis.terminal else "Engine: No line"
             )
-            self.analysis_view.clear()
+            if not self._game_analysis_report_is_current():
+                self.analysis_view.clear()
             return
         tablebase_hits = sum(line.tablebase_hits or 0 for line in analysis.lines)
         status = (
@@ -966,10 +1152,13 @@ class MainWindow(QMainWindow):
         syzygy_status = getattr(self.session.engine, "syzygy_status", "disabled")
         if isinstance(syzygy_status, str) and syzygy_status != "disabled":
             status += f" · Syzygy {syzygy_status}"
+        if live:
+            status = f"Engine: Live · depth {result.depth}/{self.session.live_analysis.max_depth}"
         self.engine_status_label.setText(status)
-        self.evaluation_bar.setValue(round(evaluation_share(best.evaluation) * 1000))
-        self.evaluation_bar.setFormat(f"Evaluation: {best.evaluation.display()}")
-        board = self.session.game.board
+        self.evaluation_bar.set_result(result)
+        if self._game_analysis_report_is_current():
+            return
+        board = chess.Board(analysis.fen)
         rows: list[str] = []
         for index, line in enumerate(analysis.lines, start=1):
             move = line.move.to_python_chess()
@@ -987,6 +1176,50 @@ class MainWindow(QMainWindow):
             rows.extend(("", f"PV: {' '.join(pv_san)}"))
         self.analysis_view.setPlainText("\n".join(rows))
 
+    def _render_live_result(self, result: LiveAnalysisResult) -> None:
+        """Immediately render a cached result for live or historical navigation."""
+        self.evaluation_bar.set_result(result)
+        self.engine_status_label.setText(f"Engine: Ready · cached depth {result.depth}")
+        if self._game_analysis_report_is_current():
+            return
+        board = chess.Board(result.fen)
+        pv_board = board.copy(stack=False)
+        pv_san: list[str] = []
+        for move_value in result.principal_variation:
+            move = move_value.to_python_chess()
+            if move not in pv_board.legal_moves:
+                break
+            pv_san.append(pv_board.san(move))
+            pv_board.push(move)
+        rows = [f"Evaluation {result.evaluation.display()} · depth {result.depth}"]
+        if pv_san:
+            rows = [f"1. {pv_san[0]}  {result.evaluation.display()}", "", *rows]
+            rows.append(f"PV: {' '.join(pv_san)}")
+        self.analysis_view.setPlainText("\n".join(rows))
+
+    def _game_analysis_report_is_current(self) -> bool:
+        analysis = self._completed_game_analysis
+        return analysis is not None and analysis.source_pgn == self.session.snapshot().pgn
+
+    def _refresh_evaluation_graph(
+        self,
+        live_snapshot: PositionSnapshot,
+        displayed_ply: int,
+    ) -> None:
+        analysis = self._completed_game_analysis
+        visible = (
+            live_snapshot.result.is_over
+            and analysis is not None
+            and analysis.source_pgn == live_snapshot.pgn
+        )
+        self.evaluation_graph.setVisible(visible)
+        if not visible or analysis is None:
+            return
+        self.evaluation_graph.set_evaluations(
+            game_analysis_evaluations(analysis),
+            displayed_ply,
+        )
+
     def _show_feedback(self, message: str, *, error: bool = True) -> None:
         color = "#8b3a2b" if error else "#386641"
         self.feedback_label.setStyleSheet(f"color: {color};")
@@ -1000,6 +1233,9 @@ class MainWindow(QMainWindow):
         if self._engine_worker is not None and self._engine_worker.isRunning():
             self._engine_worker.cancel(stop_engine=True)
             self._engine_worker.wait()
+        if self._live_analysis_worker is not None and self._live_analysis_worker.isRunning():
+            self._live_analysis_worker.cancel(stop_engine=True)
+            self._live_analysis_worker.wait()
         if self._game_analysis_worker is not None and self._game_analysis_worker.isRunning():
             self._game_analysis_worker.cancel(stop_engine=True)
             self._game_analysis_worker.wait()

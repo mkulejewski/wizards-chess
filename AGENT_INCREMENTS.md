@@ -35,6 +35,10 @@ Status meanings:
 | Stage 2.7 — launch configuration and game setup | Complete; manual acceptance pending | XDG-persisted game/setup defaults, corrected default/persistent/environment precedence, first-run or automatic-reuse startup policy, Game Setup presets/player names/clocks/strength/think time, Engine Preferences path/validation/live/advanced controls, atomic `GameSession` reconfiguration, async engine-as-White coverage, headless CLI/script preservation. A real Stockfish handshake and offscreen async White move passed; interactive browse/save/relaunch acceptance remains pending. |
 | Board graphics | Complete | Additional graphics for the board and pieces |
 | Stockfish clock/adjudication and diagnostics hardening | Complete; real-tablebase acceptance pending | Explicit fifty-move and threefold claims with bot pre-adjudication and undo/redo/PGN restoration; fixed-time versus game-clock UCI play limits; authoritative clock debit, increment, timeout, cancellation, and revision-guarded late-result rejection; separate player/post-game budgets with schema-4 migration and environment/UI wiring; optional validated Syzygy options with normal-search fallback and hit diagnostics; structured engine decisions; enriched PGN player/engine/options/termination headers plus `%emt`, `%clk`, evaluation, depth, nodes, and tablebase-hit annotations; focused supplied-FEN, migration, limit, timeout, Syzygy, and PGN round-trip tests. Stockfish 16 returned legal moves in both fixed and clock-managed real-process acceptance checks. |
+| Live engine analysis | Complete; real-Stockfish acceptance pending | Backward-compatible `off`/`fixed_time`/`live` settings with independent live depth; one continuous UCI streaming search; White-centric cp/mate result model; legality-safe per-game deepest-result cache; generation/FEN stale rejection; position-change/disable/reset/close cancellation; vertical nonlinear evaluation sidebar; historical cache reuse; bounded mate-aware graph sourced exclusively from a successfully completed full post-game analysis, with explicit gaps and click navigation; deterministic stream/cache/mapping/cancellation/GUI tests; README workflow and performance documentation. |
+| Undo during engine search | Complete | Engine move searches keep Undo enabled when history exists; clicking it cancels the pending worker before mutation, while existing FEN/revision guards reject queued late decisions. Engine-vs-engine cancellation and undo behavior is covered by GUI integration tests. |
+| Post-game analysis presentation | Complete | Completed move-by-move text reports remain visible through terminal-position refreshes and history navigation while cached/live evaluations continue updating the sidebar and the completed-analysis graph remains available. |
+| Bundled Stockfish distribution | Complete for Linux x86-64 | Official, unmodified Stockfish 18 baseline binary stored as a checksummed XZ asset; atomic first-use extraction to the XDG cache; explicit executable override, platform bundle, and system `PATH` precedence; corrupt/unsupported-bundle fallback; GPLv3, authorship, exact source archive, build target, and hashes documented. Other OS/CPU targets use the existing custom path or `PATH` until a matching release bundle is added. |
 
 ## Verification record
 
@@ -47,16 +51,20 @@ uv run ruff format --check .
 uv run pyright
 ```
 
-Final clean run on 2026-08-24:
+Final clean run on 2026-08-25:
 
-- `uv run pytest` — **296 passed**.
+- `uv run pytest` — **323 passed**.
 - `uv run ruff check .` — **passed**.
-- `uv run ruff format --check .` — **88 files already formatted**.
+- `uv run ruff format --check .` — **95 files already formatted**.
 - `uv run pyright` — **0 errors, 0 warnings**.
+- `uv build --wheel --out-dir /tmp/wizard-chess-dist` — **passed**; the wheel contains the
+  compressed Stockfish asset, manifest, GPLv3 text, authors, and upstream README.
 - `uv run wizard-chess --script examples/game.txt` — completed Scholar's mate and produced
   the expected final FEN.
-- Installed Stockfish — validation handshake passed; an offscreen GUI session produced `e4`
-  through canonical event `e2e4` as White and closed cleanly.
+- Bundled Stockfish 18 — checksum validation and fresh XDG-cache extraction completed in 5.77
+  seconds; a real `python-chess` UCI startup/cleanup handshake passed outside the restricted
+  subprocess sandbox. Real streaming acceptance remains pending; deterministic streaming and
+  cancellation adapters passed automatically.
 
 Manual acceptance still required on a machine with the relevant optional systems:
 

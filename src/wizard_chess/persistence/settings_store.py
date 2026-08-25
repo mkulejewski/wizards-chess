@@ -13,6 +13,7 @@ from wizard_chess.configuration import (
     BoardTheme,
     ClockSettings,
     ConfirmationPolicy,
+    EngineAnalysisMode,
     EngineSettings,
     EngineStrength,
     PieceSet,
@@ -26,7 +27,7 @@ from wizard_chess.configuration import (
 class SettingsStore:
     """Read current settings and tolerate missing fields from older schemas."""
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -80,8 +81,16 @@ class SettingsStore:
                 engine=EngineSettings(
                     enabled=_bool_value(engine.get("enabled"), fallback.engine.enabled),
                     path=_optional_string(engine.get("path", fallback.engine.path)),
+                    analysis_mode=_analysis_mode_value(
+                        engine,
+                        fallback.engine.analysis_mode,
+                    ),
                     analysis_enabled=_bool_value(
                         engine.get("analysis_enabled"), fallback.engine.analysis_enabled
+                    ),
+                    live_analysis_max_depth=_int_value(
+                        engine.get("live_analysis_max_depth"),
+                        fallback.engine.live_analysis_max_depth,
                     ),
                     player_mode=StockfishPlayerMode(
                         str(engine.get("player_mode", fallback.engine.player_mode))
@@ -161,6 +170,22 @@ def _optional_string(value: object) -> str | None:
         return None
     rendered = str(value).strip()
     return rendered or None
+
+
+def _analysis_mode_value(
+    values: dict[str, object],
+    default: EngineAnalysisMode,
+) -> EngineAnalysisMode:
+    raw_mode = values.get("analysis_mode")
+    if raw_mode is not None:
+        return EngineAnalysisMode(str(raw_mode))
+    if "analysis_enabled" not in values:
+        return default
+    return (
+        EngineAnalysisMode.FIXED_TIME
+        if _bool_value(values["analysis_enabled"], False)
+        else EngineAnalysisMode.OFF
+    )
 
 
 def _optional_int(value: object) -> int | None:

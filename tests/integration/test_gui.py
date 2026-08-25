@@ -3,24 +3,34 @@ from pathlib import Path
 from threading import Event
 from time import monotonic
 
+import chess
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+from wizard_chess.analysis.live import LiveAnalysisResult, position_key
 from wizard_chess.application.session import GameSession
 from wizard_chess.configuration import (
     AppearanceSettings,
     ApplicationSettings,
     BoardTheme,
+    EngineAnalysisMode,
     EngineSettings,
     PieceSet,
     PlayerKind,
     PlayerSettings,
 )
 from wizard_chess.domain.move import ChessMove
+from wizard_chess.engine.base import AnalysisUpdate
 from wizard_chess.engine.mock import FakeEngine
-from wizard_chess.engine.models import EngineEvaluation, EngineLine, PositionAnalysis
+from wizard_chess.engine.models import (
+    EngineClockState,
+    EngineDecision,
+    EngineEvaluation,
+    EngineLine,
+    PositionAnalysis,
+)
 from wizard_chess.gui.main_window import MainWindow
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.persistence.settings_store import SettingsStore
@@ -69,6 +79,70 @@ class GatedRecognizer:
             if cancel_requested():
                 break
         return Transcript(self.transcript)
+
+
+class GatedLiveEngine(FakeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.live_started = Event()
+        self.live_cancelled = Event()
+        self.live_request_count = 0
+
+    def analyse_live(
+        self,
+        board: chess.Board,
+        *,
+        max_depth: int,
+        on_update: AnalysisUpdate,
+        cancel_requested: CancellationCheck | None = None,
+    ) -> None:
+        self.live_request_count += 1
+        self.live_started.set()
+        if self.live_request_count == 1:
+            while cancel_requested is None or not cancel_requested():
+                self.live_cancelled.wait(0.005)
+            self.live_cancelled.set()
+            return
+        move = ChessMove.from_python_chess(next(iter(board.legal_moves)))
+        on_update(
+            PositionAnalysis(
+                fen=board.fen(),
+                lines=(
+                    EngineLine(
+                        move=move,
+                        evaluation=EngineEvaluation(score_cp=20),
+                        principal_variation=(move,),
+                        depth=max_depth,
+                    ),
+                ),
+            )
+        )
+
+
+class GatedEngineMoves(FakeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.request_count = 0
+        self.thinking = Event()
+        self.cancelled = Event()
+        self._poll = Event()
+
+    def play_move(
+        self,
+        board: chess.Board,
+        *,
+        clock: EngineClockState | None = None,
+        cancel_requested: CancellationCheck | None = None,
+    ) -> EngineDecision | None:
+        del board, clock
+        self.request_count += 1
+        if self.request_count == 1:
+            return EngineDecision(move=ChessMove.from_uci("e2e4"))
+        self.thinking.set()
+        while cancel_requested is None or not cancel_requested():
+            self._poll.wait(0.005)
+        self.cancelled.set()
+        return None
 
 
 def wait_for_gui(
@@ -365,6 +439,31 @@ def test_gui_engine_opponent_replies_without_a_second_move_path(
     window.close()
 
 
+def test_gui_can_cancel_engine_thinking_and_undo_last_engine_move(
+    qt_application: QApplication,
+) -> None:
+    engine = GatedEngineMoves()
+    settings = ApplicationSettings(
+        engine=EngineSettings(enabled=True),
+        players=PlayerSettings(
+            white_kind=PlayerKind.ENGINE,
+            black_kind=PlayerKind.ENGINE,
+        ),
+    )
+    session = GameSession(settings=settings, engine=engine)
+    window = MainWindow(session)
+
+    wait_for_gui(qt_application, lambda: engine.thinking.is_set())
+    assert session.snapshot().move_history == ("e4",)
+    assert window.undo_button.isEnabled()
+
+    QTest.mouseClick(window.undo_button, Qt.MouseButton.LeftButton)
+
+    wait_for_gui(qt_application, lambda: engine.cancelled.is_set())
+    assert session.snapshot().move_history == ()
+    window.close()
+
+
 def test_gui_history_navigation_does_not_mutate_live_game(
     qt_application: QApplication,
 ) -> None:
@@ -421,4 +520,152 @@ def test_gui_post_game_analysis_reports_progress_without_mutating_game(
     assert "White ACPL" in window.analysis_view.toPlainText()
     assert "1. e4" in window.analysis_view.toPlainText()
     assert session.snapshot().fen == live_fen
+    assert window.evaluation_graph.isHidden()
+    window.close()
+
+
+def test_gui_live_analysis_updates_depth_cache_and_historical_sidebar(
+    qt_application: QApplication,
+) -> None:
+    initial = chess.Board()
+    after_e4 = initial.copy(stack=False)
+    after_e4.push_uci("e2e4")
+
+    def updates(board: chess.Board, scores: tuple[int, ...]) -> tuple[PositionAnalysis, ...]:
+        move = ChessMove.from_python_chess(next(iter(board.legal_moves)))
+        return tuple(
+            PositionAnalysis(
+                fen=board.fen(),
+                lines=(
+                    EngineLine(
+                        move=move,
+                        evaluation=EngineEvaluation(score_cp=score),
+                        principal_variation=(move,),
+                        depth=depth,
+                    ),
+                ),
+            )
+            for depth, score in zip((5, 8, 12), scores, strict=True)
+        )
+
+    engine = FakeEngine(
+        live_updates={
+            initial.fen(): updates(initial, (10, 18, 24)),
+            after_e4.fen(): updates(after_e4, (12, 16, 20)),
+        }
+    )
+    settings = ApplicationSettings(
+        engine=EngineSettings(
+            enabled=True,
+            analysis_mode=EngineAnalysisMode.LIVE,
+            live_analysis_max_depth=12,
+        )
+    )
+    session = GameSession(settings=settings, engine=engine)
+    window = MainWindow(session)
+
+    wait_for_gui(
+        qt_application,
+        lambda: (
+            window.evaluation_bar.result is not None and window.evaluation_bar.result.depth == 12
+        ),
+    )
+    assert window.evaluation_bar.format() == "Evaluation: +0.24"
+
+    window.command_input.setText("e4")
+    QTest.mouseClick(window.play_button, Qt.MouseButton.LeftButton)
+    wait_for_gui(
+        qt_application,
+        lambda: (
+            window.evaluation_bar.result is not None
+            and window.evaluation_bar.result.fen == after_e4.fen()
+            and window.evaluation_bar.result.depth == 12
+        ),
+    )
+    assert len(session.live_analysis.cache) == 2
+
+    window.history_slider.setValue(0)
+    assert window.evaluation_bar.result is not None
+    assert window.evaluation_bar.result.fen == initial.fen()
+    assert window.evaluation_bar.format() == "Evaluation: +0.24"
+    window.close()
+
+
+def test_gui_position_change_cancels_previous_live_stream(
+    qt_application: QApplication,
+) -> None:
+    engine = GatedLiveEngine()
+    settings = ApplicationSettings(
+        engine=EngineSettings(
+            enabled=True,
+            analysis_mode=EngineAnalysisMode.LIVE,
+            live_analysis_max_depth=10,
+        )
+    )
+    session = GameSession(settings=settings, engine=engine)
+    window = MainWindow(session)
+    assert engine.live_started.wait(1.0)
+
+    session.play_text("e4")
+    window.refresh()
+
+    assert engine.live_cancelled.wait(1.0)
+    wait_for_gui(qt_application, lambda: engine.live_request_count == 2)
+    assert window.evaluation_bar.result is not None
+    assert window.evaluation_bar.result.fen == session.snapshot().fen
+    window.close()
+
+
+def test_finished_game_preserves_report_graph_and_sidebar_analysis(
+    qt_application: QApplication,
+) -> None:
+    move = ChessMove.from_uci("e2e4")
+    engine = FakeEngine(
+        default=PositionAnalysis(
+            fen="ignored",
+            lines=(
+                EngineLine(
+                    move=move,
+                    evaluation=EngineEvaluation(score_cp=25),
+                    principal_variation=(move,),
+                ),
+            ),
+        )
+    )
+    settings = ApplicationSettings(engine=EngineSettings(enabled=True))
+    session = GameSession(settings=settings, engine=engine)
+    for command in ("f3", "e5", "g4", "Qh4#"):
+        session.play_text(command)
+    fens = session.position_fens()
+    for ply, fen in enumerate(fens):
+        session.live_analysis.cache.store(
+            LiveAnalysisResult(
+                position_id=position_key(fen),
+                ply=ply,
+                fen=fen,
+                depth=10 + ply,
+                evaluation=EngineEvaluation(score_cp=900),
+            )
+        )
+    window = MainWindow(session)
+
+    assert window.evaluation_graph.isHidden()
+    QTest.mouseClick(window.analyse_game_button, Qt.MouseButton.LeftButton)
+    wait_for_gui(qt_application, lambda: not window.game_analysis_active)
+
+    assert not window.evaluation_graph.isHidden()
+    assert window.evaluation_graph.values == (0.25, 0.25, 0.25, 0.25, 0.25)
+    report = window.analysis_view.toPlainText()
+    assert "White ACPL" in report
+    assert "1. f3" in report
+    assert "(0 cp)" in report
+
+    window.history_slider.setValue(1)
+    assert window.evaluation_graph.current_ply == 1
+    assert window.evaluation_bar.result is not None
+    assert window.evaluation_bar.result.ply == 1
+    assert window.analysis_view.toPlainText() == report
+
+    QTest.mouseClick(window.undo_button, Qt.MouseButton.LeftButton)
+    assert window.evaluation_graph.isHidden()
     window.close()

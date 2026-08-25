@@ -7,12 +7,14 @@ from pathlib import Path
 
 import chess
 
+from wizard_chess.analysis.live import LiveAnalysisController
 from wizard_chess.application.clock import ChessClock, ClockSnapshot
 from wizard_chess.commands.intents import CommandIntent, CommandName, MoveCommandIntent
 from wizard_chess.commands.language import LanguageCommandParser
 from wizard_chess.commands.resolver import MoveResolver
 from wizard_chess.configuration import (
     ApplicationSettings,
+    EngineAnalysisMode,
     EngineSettings,
     PlayerKind,
     StockfishPlayerMode,
@@ -101,7 +103,8 @@ class GameSession:
         self._engine = engine if engine is not None else self._engine_factory(self.settings.engine)
         self._game_store = game_store
         self._clock = clock or ChessClock(self.settings.clock)
-        self._analysis_enabled = self.settings.engine.analysis_enabled
+        self._analysis_mode = self.settings.engine.analysis_mode
+        self.live_analysis = LiveAnalysisController(self.settings.engine.live_analysis_max_depth)
         self._last_feedback: str | None = None
         self._revision = 0
 
@@ -116,7 +119,12 @@ class GameSession:
 
     @property
     def analysis_enabled(self) -> bool:
-        return self._analysis_enabled
+        return self._analysis_mode is not EngineAnalysisMode.OFF
+
+    @property
+    def analysis_mode(self) -> EngineAnalysisMode:
+        """Return the runtime mode, which commands may temporarily disable."""
+        return self._analysis_mode
 
     @property
     def revision(self) -> int:
@@ -164,6 +172,16 @@ class GameSession:
             viewed_ply=ply,
             revision=self._revision,
         )
+
+    def position_fens(self) -> tuple[str, ...]:
+        """Return initial-through-current FENs for cached evaluation plotting."""
+        source = self._game.board
+        replay = source.root()
+        fens = [replay.fen()]
+        for move in source.move_stack:
+            replay.push(move)
+            fens.append(replay.fen())
+        return tuple(fens)
 
     def _snapshot_for_game(self, game: ChessGame) -> PositionSnapshot:
         board = game.board
@@ -287,6 +305,7 @@ class GameSession:
             return
         self._game = self._new_configured_game()
         self._clock.reset(self._game.turn)
+        self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
         self._last_feedback = None
         self._autosave()
@@ -305,7 +324,8 @@ class GameSession:
         self._engine = replacement_engine
         self._clock = replacement_clock
         self._game = replacement_game
-        self._analysis_enabled = configured.engine.analysis_enabled
+        self._analysis_mode = configured.engine.analysis_mode
+        self.live_analysis.reset(configured.engine.live_analysis_max_depth)
         self._last_feedback = None
         self._revision += 1
         if previous_engine is not None:
@@ -317,6 +337,7 @@ class GameSession:
         """Load a validated position and clear its unavailable history."""
         self._game.load_fen(fen)
         self._clock.reset(self._game.turn)
+        self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
         self._autosave()
 
@@ -326,6 +347,7 @@ class GameSession:
         replacement.load_pgn(pgn)
         self._game = replacement
         self._clock.reset(self._game.turn)
+        self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
         self._autosave()
 
@@ -437,6 +459,7 @@ class GameSession:
         self._autosave()
         if self._engine is not None:
             self._engine.close()
+        self.live_analysis.reset()
 
     def _execute_command(self, intent: CommandIntent) -> SessionResult:
         command = intent.command
@@ -493,9 +516,15 @@ class GameSession:
                 or translate("session.nothing_to_repeat", self.voice_language)
             )
         if command is CommandName.ANALYSIS_ON:
-            self._analysis_enabled = True
+            configured = self.settings.engine.analysis_mode
+            self._analysis_mode = (
+                configured
+                if configured is not EngineAnalysisMode.OFF
+                else EngineAnalysisMode.FIXED_TIME
+            )
             return SessionResult(message=translate("session.analysis_enabled", self.voice_language))
-        self._analysis_enabled = False
+        self._analysis_mode = EngineAnalysisMode.OFF
+        self.live_analysis.invalidate_selection()
         return SessionResult(message=translate("session.analysis_disabled", self.voice_language))
 
     def _autosave(self) -> None:

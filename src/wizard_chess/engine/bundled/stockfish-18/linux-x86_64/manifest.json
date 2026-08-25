@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "version": "stockfish-18",
+  "platform_key": "linux-x86_64",
+  "archive": "stockfish.xz",
+  "archive_sha256": "785c19e66634a1758122cda70be1ea770ca308119fbe3b502bbe3facca628be4",
+  "executable": "stockfish",
+  "executable_sha256": "7a44d64fd877ee888a5160349827563444e1935ca6c1095d0f8e0859d57101c7",
+  "executable_size": 112920960,
+  "upstream_release": "https://github.com/official-stockfish/Stockfish/releases/tag/sf_18",
+  "source_and_binary_archive": "https://github.com/official-stockfish/Stockfish/releases/download/sf_18/stockfish-ubuntu-x86-64.tar",
+  "build": "Official Stockfish 18 Linux x86-64 baseline build; no Wizard Chess modifications"
+}

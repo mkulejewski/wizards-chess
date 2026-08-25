@@ -1,5 +1,7 @@
+from collections.abc import Iterator
 from pathlib import Path
-from typing import NoReturn
+from types import TracebackType
+from typing import NoReturn, Self
 
 import chess
 import chess.engine
@@ -44,6 +46,57 @@ class FakeUciProcess:
 
     def quit(self) -> None:
         self.quit_called = True
+
+
+class FakeStreamingResult:
+    def __init__(self, updates: list[chess.engine.InfoDict]) -> None:
+        self.updates = updates
+        self.exited = False
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(
+        self,
+        exception_type: type[BaseException] | None,
+        exception: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        del exception_type, exception, traceback
+        self.exited = True
+
+    def __iter__(self) -> Iterator[chess.engine.InfoDict]:
+        return iter(self.updates)
+
+
+class FakeStreamingUciProcess(FakeUciProcess):
+    def __init__(self) -> None:
+        super().__init__()
+        self.analysis_calls = 0
+        self.stream: FakeStreamingResult | None = None
+
+    def analysis(
+        self,
+        board: chess.Board,
+        limit: chess.engine.Limit,
+        *,
+        multipv: int,
+        info: chess.engine.Info,
+    ) -> FakeStreamingResult:
+        del limit, multipv, info
+        move = next(iter(board.legal_moves))
+        self.analysis_calls += 1
+        self.stream = FakeStreamingResult(
+            [
+                {
+                    "score": chess.engine.PovScore(chess.engine.Cp(depth), board.turn),
+                    "pv": [move],
+                    "depth": depth,
+                }
+                for depth in (5, 5, 8, 12)
+            ]
+        )
+        return self.stream
 
 
 def _analysis(board: chess.Board, move: str, score_cp: int) -> PositionAnalysis:
@@ -98,6 +151,32 @@ def test_stockfish_adapter_configures_normalizes_and_closes_owned_process(
     assert board.fen() == original_fen
     engine.close()
     assert process.quit_called
+
+
+def test_stockfish_live_analysis_uses_one_stream_and_publishes_new_depths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = FakeStreamingUciProcess()
+
+    def start_streaming_process(_path: str) -> FakeStreamingUciProcess:
+        return process
+
+    monkeypatch.setattr(chess.engine.SimpleEngine, "popen_uci", start_streaming_process)
+    engine = StockfishEngine(EngineSettings(enabled=True, path="fake-stockfish"))
+    updates: list[int | None] = []
+
+    engine.analyse_live(
+        chess.Board(),
+        max_depth=12,
+        on_update=lambda result: updates.append(
+            result.best_line.depth if result.best_line is not None else None
+        ),
+    )
+
+    assert updates == [5, 8, 12]
+    assert process.analysis_calls == 1
+    assert process.stream is not None and process.stream.exited
+    engine.close()
 
 
 def test_stockfish_unavailable_and_crashed_are_controlled(

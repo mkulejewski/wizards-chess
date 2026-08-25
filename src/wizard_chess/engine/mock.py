@@ -5,7 +5,7 @@ from collections.abc import Mapping
 import chess
 
 from wizard_chess.domain.move import ChessMove
-from wizard_chess.engine.base import CancellationCheck
+from wizard_chess.engine.base import AnalysisUpdate, CancellationCheck
 from wizard_chess.engine.models import EngineClockState, EngineDecision, PositionAnalysis
 
 
@@ -17,12 +17,16 @@ class FakeEngine:
         analyses: Mapping[str, PositionAnalysis] | None = None,
         *,
         default: PositionAnalysis | None = None,
+        live_updates: Mapping[str, tuple[PositionAnalysis, ...]] | None = None,
     ) -> None:
         self.analyses = dict(analyses or {})
         self.default = default
+        self.live_updates = dict(live_updates or {})
         self.requests: list[str] = []
         self.analysis_times_ms: list[int | None] = []
         self.play_requests: list[tuple[str, EngineClockState | None]] = []
+        self.live_requests: list[tuple[str, int]] = []
+        self.live_cancelled = 0
         self.closed = False
 
     @property
@@ -54,6 +58,28 @@ class FakeEngine:
                 terminal=self.default.terminal,
             )
         return PositionAnalysis(fen=fen, terminal=board.is_game_over(claim_draw=False))
+
+    def analyse_live(
+        self,
+        board: chess.Board,
+        *,
+        max_depth: int,
+        on_update: AnalysisUpdate,
+        cancel_requested: CancellationCheck | None = None,
+    ) -> None:
+        fen = board.fen()
+        self.live_requests.append((fen, max_depth))
+        updates = self.live_updates.get(fen)
+        if updates is None:
+            fallback = self.analyse_position(board, count=1, cancel_requested=cancel_requested)
+            updates = (fallback,) if fallback.best_line is not None else ()
+        for update in updates:
+            if cancel_requested is not None and cancel_requested():
+                self.live_cancelled += 1
+                from wizard_chess.domain.exceptions import AnalysisCancelledError
+
+                raise AnalysisCancelledError("Live engine analysis was cancelled")
+            on_update(update)
 
     def get_best_move(self, board: chess.Board) -> ChessMove | None:
         line = self.analyse_position(board, count=1).best_line

@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QApplication
 from wizard_chess.application.session import GameSession
 from wizard_chess.configuration import (
     ApplicationSettings,
+    EngineAnalysisMode,
     EngineSettings,
     EngineStrength,
     PlayerKind,
@@ -129,7 +130,10 @@ def test_engine_preferences_exposes_path_defaults_and_advanced_values(
     dialog.player_mode_combo.setCurrentIndex(
         dialog.player_mode_combo.findData(StockfishPlayerMode.GAME_CLOCK.value)
     )
-    dialog.live_analysis_checkbox.setChecked(True)
+    dialog.analysis_mode_combo.setCurrentIndex(
+        dialog.analysis_mode_combo.findData(EngineAnalysisMode.LIVE.value)
+    )
+    dialog.live_depth_spin.setValue(24)
     dialog.multipv_spin.setValue(5)
     dialog.depth_spin.setValue(18)
     dialog.threads_spin.setValue(4)
@@ -143,7 +147,9 @@ def test_engine_preferences_exposes_path_defaults_and_advanced_values(
     assert selected.engine == EngineSettings(
         enabled=True,
         path="/opt/custom-stockfish",
+        analysis_mode=EngineAnalysisMode.LIVE,
         analysis_enabled=True,
+        live_analysis_max_depth=24,
         player_mode=StockfishPlayerMode.GAME_CLOCK,
         player_move_analysis_time_ms=2500,
         post_game_analysis_time_ms=3500,

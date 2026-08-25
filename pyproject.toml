@@ -31,6 +31,7 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/wizard_chess"]
+artifacts = ["src/wizard_chess/engine/bundled/**"]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

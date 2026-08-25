@@ -70,13 +70,25 @@ class StockfishPlayerMode(StrEnum):
     GAME_CLOCK = "game_clock"
 
 
+class EngineAnalysisMode(StrEnum):
+    """How displayed positions are evaluated independently of engine players."""
+
+    OFF = "off"
+    FIXED_TIME = "fixed_time"
+    LIVE = "live"
+
+
 @dataclass(frozen=True, slots=True)
 class EngineSettings:
     """Settings for optional UCI analysis and engine play."""
 
     enabled: bool = False
     path: str | None = None
+    analysis_mode: EngineAnalysisMode = EngineAnalysisMode.OFF
+    # Kept in the persisted/API shape so schema <=4 and existing callers remain
+    # compatible. New code should use analysis_mode.
     analysis_enabled: bool = False
+    live_analysis_max_depth: int = 20
     player_mode: StockfishPlayerMode = StockfishPlayerMode.FIXED_ANALYSIS_TIME
     player_move_analysis_time_ms: int = 500
     post_game_analysis_time_ms: int = 500
@@ -90,12 +102,18 @@ class EngineSettings:
     syzygy_50_move_rule: bool = True
 
     def __post_init__(self) -> None:
+        if self.analysis_mode is EngineAnalysisMode.OFF and self.analysis_enabled:
+            object.__setattr__(self, "analysis_mode", EngineAnalysisMode.FIXED_TIME)
+        elif self.analysis_mode is not EngineAnalysisMode.OFF and not self.analysis_enabled:
+            object.__setattr__(self, "analysis_enabled", True)
         if self.player_move_analysis_time_ms <= 0:
             raise ValueError("Stockfish player move analysis time must be positive")
         if self.post_game_analysis_time_ms <= 0:
             raise ValueError("Post-game analysis time must be positive")
         if self.analysis_depth is not None and self.analysis_depth <= 0:
             raise ValueError("Engine analysis depth must be positive")
+        if self.live_analysis_max_depth <= 0:
+            raise ValueError("Live analysis maximum depth must be positive")
         if self.multipv <= 0:
             raise ValueError("Engine MultiPV count must be positive")
         if self.threads <= 0 or self.hash_mb <= 0:
@@ -164,7 +182,7 @@ class ApplicationSettings:
         """Return whether any selected feature requires the engine adapter."""
         return (
             self.engine.enabled
-            or self.engine.analysis_enabled
+            or self.engine.analysis_mode is not EngineAnalysisMode.OFF
             or self.players.white_kind is PlayerKind.ENGINE
             or self.players.black_kind is PlayerKind.ENGINE
         )
@@ -199,13 +217,27 @@ class ApplicationSettings:
         engine_enabled = _bool_environment(
             values, "WIZARD_CHESS_ENGINE_ENABLED", defaults.engine.enabled
         )
-        analysis_default = (
+        analysis_enabled_default = (
             engine_enabled
             if "WIZARD_CHESS_ENGINE_ENABLED" in values
             else defaults.engine.analysis_enabled
         )
         analysis_enabled = _bool_environment(
-            values, "WIZARD_CHESS_ANALYSIS_ENABLED", analysis_default
+            values, "WIZARD_CHESS_ANALYSIS_ENABLED", analysis_enabled_default
+        )
+        legacy_analysis_mode = (
+            EngineAnalysisMode.FIXED_TIME if analysis_enabled else EngineAnalysisMode.OFF
+        )
+        analysis_mode = _enum_environment(
+            values,
+            "WIZARD_CHESS_ANALYSIS_MODE",
+            EngineAnalysisMode,
+            (
+                defaults.engine.analysis_mode
+                if "WIZARD_CHESS_ANALYSIS_ENABLED" not in values
+                and "WIZARD_CHESS_ENGINE_ENABLED" not in values
+                else legacy_analysis_mode
+            ),
         )
         path = (
             values["WIZARD_CHESS_ENGINE_PATH"].strip() or None
@@ -261,7 +293,14 @@ class ApplicationSettings:
             engine=EngineSettings(
                 enabled=engine_enabled,
                 path=path,
-                analysis_enabled=analysis_enabled,
+                analysis_mode=analysis_mode,
+                analysis_enabled=analysis_mode is not EngineAnalysisMode.OFF,
+                live_analysis_max_depth=_int_environment(
+                    values,
+                    "WIZARD_CHESS_LIVE_ANALYSIS_MAX_DEPTH",
+                    defaults.engine.live_analysis_max_depth,
+                    1,
+                ),
                 player_mode=_enum_environment(
                     values,
                     "WIZARD_CHESS_STOCKFISH_PLAYER_MODE",
@@ -365,6 +404,8 @@ GAME_SETUP_ENVIRONMENT_VARIABLES = frozenset(
         "WIZARD_CHESS_ENGINE_ENABLED",
         "WIZARD_CHESS_ENGINE_PATH",
         "WIZARD_CHESS_ANALYSIS_ENABLED",
+        "WIZARD_CHESS_ANALYSIS_MODE",
+        "WIZARD_CHESS_LIVE_ANALYSIS_MAX_DEPTH",
         "WIZARD_CHESS_ENGINE_TIME_MS",
         "WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS",
         "WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS",

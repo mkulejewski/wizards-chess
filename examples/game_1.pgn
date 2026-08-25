@@ -1,0 +1,110 @@
+[Event "?"]
+[Site "?"]
+[Date "????.??.??"]
+[Round "?"]
+[White "White"]
+[Black "Black"]
+[Result "1-0"]
+[WhiteType "Human"]
+[BlackType "Stockfish"]
+[EngineStrength "beginner"]
+[EngineThreads "8"]
+[EngineHashMB "512"]
+[StockfishPlayerMode "fixed_analysis_time"]
+[PlayerMoveAnalysisTimeMs "500"]
+[Engine "Stockfish 18"]
+[BlackEngine "Stockfish 18"]
+[Termination "checkmate"]
+
+1. e4 Nf6
+{ [%emt 0:00:00.5] [%eval 0.25] [%depth 12] [%nodes 1465621] [%tbhits 0] } 2.
+e5 Ne4
+{ [%emt 0:00:00.5] [%eval 0.58] [%depth 13] [%nodes 1342354] [%tbhits 0] } 3.
+d3 Nc5
+{ [%emt 0:00:00.501] [%eval 1.30] [%depth 15] [%nodes 1287095] [%tbhits 0] } 4.
+d4 Na4
+{ [%emt 0:00:00.501] [%eval 1.35] [%depth 14] [%nodes 1268650] [%tbhits 0] } 5.
+c4 Nb6
+{ [%emt 0:00:00.501] [%eval 1.49] [%depth 13] [%nodes 1260223] [%tbhits 0] } 6.
+f4 g6
+{ [%emt 0:00:00.501] [%eval 1.44] [%depth 14] [%nodes 1232106] [%tbhits 0] } 7.
+Nf3 Bg7
+{ [%emt 0:00:00.501] [%eval 1.78] [%depth 13] [%nodes 1137666] [%tbhits 0] } 8.
+g3 c6
+{ [%emt 0:00:00.5] [%eval 0.50] [%depth 13] [%nodes 1143712] [%tbhits 0] } 9.
+Bg2 a5
+{ [%emt 0:00:00.5] [%eval -0.09] [%depth 13] [%nodes 1236275] [%tbhits 0] } 10.
+O-O a4
+{ [%emt 0:00:00.5] [%eval 0.90] [%depth 12] [%nodes 1185654] [%tbhits 0] } 11.
+a3 Nxc4
+{ [%emt 0:00:00.5] [%eval 0.10] [%depth 12] [%nodes 1190456] [%tbhits 0] } 12.
+Qc2 d5
+{ [%emt 0:00:00.502] [%eval -1.09] [%depth 13] [%nodes 1251092] [%tbhits 0] }
+13. exd6 Nxd6
+{ [%emt 0:00:00.501] [%eval -1.51] [%depth 14] [%nodes 1215846] [%tbhits 0] }
+14. Be3 Be6
+{ [%emt 0:00:00.5] [%eval -1.88] [%depth 13] [%nodes 1233467] [%tbhits 0] } 15.
+Nc3 Bf5
+{ [%emt 0:00:00.502] [%eval -1.94] [%depth 13] [%nodes 1094904] [%tbhits 0] }
+16. Qd2 Nc4
+{ [%emt 0:00:00.501] [%eval -1.67] [%depth 16] [%nodes 1262859] [%tbhits 0] }
+17. Qe2 Be6
+{ [%emt 0:00:00.501] [%eval -1.58] [%depth 12] [%nodes 1210769] [%tbhits 0] }
+18. Rad1 Nd6
+{ [%emt 0:00:00.5] [%eval -1.60] [%depth 12] [%nodes 1176861] [%tbhits 0] } 19.
+Bf2 Nd7
+{ [%emt 0:00:00.501] [%eval -2.18] [%depth 14] [%nodes 1261221] [%tbhits 0] }
+20. Rfe1 Bc4
+{ [%emt 0:00:00.502] [%eval -1.81] [%depth 11] [%nodes 1053945] [%tbhits 0] }
+21. Qd2 Bd5
+{ [%emt 0:00:00.503] [%eval -1.74] [%depth 13] [%nodes 1262160] [%tbhits 0] }
+22. Ne5 Bxg2
+{ [%emt 0:00:00.5] [%eval -1.62] [%depth 13] [%nodes 1204800] [%tbhits 0] } 23.
+Kxg2 O-O
+{ [%emt 0:00:00.5] [%eval -0.83] [%depth 13] [%nodes 1411977] [%tbhits 0] } 24.
+Nxd7 Nc4
+{ [%emt 0:00:00.5] [%eval -1.48] [%depth 16] [%nodes 1211549] [%tbhits 0] } 25.
+Qc2 Nxb2
+{ [%emt 0:00:00.501] [%eval -1.81] [%depth 15] [%nodes 1277450] [%tbhits 0] }
+26. Qxb2 Qxd7
+{ [%emt 0:00:00.5] [%eval 2.87] [%depth 14] [%nodes 1583582] [%tbhits 0] } 27.
+Qb4 b5
+{ [%emt 0:00:00.5] [%eval 2.82] [%depth 13] [%nodes 1455607] [%tbhits 0] } 28.
+d5 Rfc8
+{ [%emt 0:00:00.5] [%eval 3.02] [%depth 14] [%nodes 1584307] [%tbhits 0] } 29.
+Rxe7 Bxc3
+{ [%emt 0:00:00.5] [%eval 3.85] [%depth 13] [%nodes 1606068] [%tbhits 0] } 30.
+Rxd7 Bxb4
+{ [%emt 0:00:00.5] [%eval 4.27] [%depth 14] [%nodes 2238091] [%tbhits 0] } 31.
+axb4 cxd5
+{ [%emt 0:00:00.5] [%eval 4.52] [%depth 13] [%nodes 1881072] [%tbhits 0] } 32.
+R1xd5 Rc2
+{ [%emt 0:00:00.501] [%eval 4.52] [%depth 11] [%nodes 2056526] [%tbhits 0] }
+33. Rxb5 a3
+{ [%emt 0:00:00.5] [%eval 4.37] [%depth 11] [%nodes 1981196] [%tbhits 0] } 34.
+Ra5 Rxf2+
+{ [%emt 0:00:00.501] [%eval 4.77] [%depth 13] [%nodes 2310075] [%tbhits 0] }
+35. Kxf2 Rc8
+{ [%emt 0:00:00.5] [%eval 6.57] [%depth 15] [%nodes 4125427] [%tbhits 0] } 36.
+Rxa3 g5
+{ [%emt 0:00:00.5] [%eval 7.53] [%depth 13] [%nodes 4433865] [%tbhits 0] } 37.
+fxg5 h6
+{ [%emt 0:00:00.5] [%eval 7.30] [%depth 15] [%nodes 4084691] [%tbhits 0] } 38.
+gxh6 Rc1
+{ [%emt 0:00:00.5] [%eval 8.24] [%depth 12] [%nodes 5222464] [%tbhits 0] } 39.
+Rb3 Rc2+
+{ [%emt 0:00:00.5] [%eval 6.63] [%depth 15] [%nodes 4068132] [%tbhits 0] } 40.
+Kf3 f5
+{ [%emt 0:00:00.5] [%eval 9.93] [%depth 10] [%nodes 4931940] [%tbhits 0] } 41.
+b5 Rc1
+{ [%emt 0:00:00.027] [%eval #8] [%depth 20] [%nodes 218751] [%tbhits 0] } 42.
+b6 f4 { [%emt 0:00:00.007] [%eval #5] [%depth 20] [%nodes 56752] [%tbhits 0] }
+43. Kxf4 Kh8
+{ [%emt 0:00:00.056] [%eval #9] [%depth 20] [%nodes 587867] [%tbhits 0] } 44.
+b7 Rc4+
+{ [%emt 0:00:00.002] [%eval #4] [%depth 20] [%nodes 30367] [%tbhits 0] } 45.
+Kf3 Rg4
+{ [%emt 0:00:00.002] [%eval #2] [%depth 20] [%nodes 16259] [%tbhits 0] } 46.
+Kxg4 Kg8
+{ [%emt 0:00:00.001] [%eval #1] [%depth 20] [%nodes 2298] [%tbhits 0] } 47.
+b8=R# 1-0

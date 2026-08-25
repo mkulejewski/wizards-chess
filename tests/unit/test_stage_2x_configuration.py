@@ -7,6 +7,7 @@ from wizard_chess.configuration import (
     ApplicationSettings,
     BoardTheme,
     ClockSettings,
+    EngineAnalysisMode,
     EngineSettings,
     EngineStrength,
     PieceSet,
@@ -27,6 +28,8 @@ def test_environment_configuration_covers_optional_subsystems(
         "WIZARD_CHESS_ENGINE_ENABLED": "true",
         "WIZARD_CHESS_ENGINE_PATH": "/opt/stockfish",
         "WIZARD_CHESS_ANALYSIS_ENABLED": "yes",
+        "WIZARD_CHESS_ANALYSIS_MODE": "live",
+        "WIZARD_CHESS_LIVE_ANALYSIS_MAX_DEPTH": "24",
         "WIZARD_CHESS_ENGINE_MULTIPV": "4",
         "WIZARD_CHESS_STOCKFISH_PLAYER_MODE": "game_clock",
         "WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS": "800",
@@ -48,6 +51,8 @@ def test_environment_configuration_covers_optional_subsystems(
 
     assert settings.voice_language is VoiceLanguage.POLISH
     assert settings.engine.path == "/opt/stockfish"
+    assert settings.engine.analysis_mode is EngineAnalysisMode.LIVE
+    assert settings.engine.live_analysis_max_depth == 24
     assert settings.engine.multipv == 4
     assert settings.engine.player_mode is StockfishPlayerMode.GAME_CLOCK
     assert settings.engine.player_move_analysis_time_ms == 800
@@ -68,6 +73,8 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
         engine=EngineSettings(
             enabled=True,
             path="stockfish",
+            analysis_mode=EngineAnalysisMode.LIVE,
+            live_analysis_max_depth=26,
             player_move_analysis_time_ms=2500,
             post_game_analysis_time_ms=2500,
             multipv=2,
@@ -96,6 +103,29 @@ def test_settings_store_round_trip_and_missing_field_defaulting(tmp_path: Path) 
     assert defaulted.autosave
     assert defaulted.voice_language is VoiceLanguage.ENGLISH
     assert defaulted.appearance == AppearanceSettings()
+
+
+def test_legacy_analysis_boolean_migrates_to_fixed_time_mode(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    path.write_text(
+        '{"schema_version": 4, "settings": {"engine": {"analysis_enabled": true}}}',
+        encoding="utf-8",
+    )
+
+    loaded = SettingsStore(path).load()
+
+    assert loaded.engine.analysis_mode is EngineAnalysisMode.FIXED_TIME
+    assert loaded.engine.analysis_enabled
+
+    path.write_text(
+        '{"schema_version": 4, "settings": {"engine": {"analysis_enabled": false}}}',
+        encoding="utf-8",
+    )
+    live_defaults = ApplicationSettings(
+        engine=EngineSettings(analysis_mode=EngineAnalysisMode.LIVE)
+    )
+    disabled = SettingsStore(path).load(live_defaults)
+    assert disabled.engine.analysis_mode is EngineAnalysisMode.OFF
 
 
 def test_environment_values_override_persisted_values_without_replacing_them() -> None:

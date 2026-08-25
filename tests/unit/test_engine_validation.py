@@ -4,7 +4,8 @@ import pytest
 
 from wizard_chess.configuration import EngineSettings
 from wizard_chess.domain.exceptions import EngineUnavailableError
-from wizard_chess.engine.factory import validate_stockfish_engine
+from wizard_chess.engine import factory
+from wizard_chess.engine.factory import resolve_stockfish_path, validate_stockfish_engine
 
 
 class ValidationEngine:
@@ -20,6 +21,44 @@ class ValidationEngine:
 
     def close(self) -> None:
         self.closed = True
+
+
+def test_explicit_engine_path_wins_over_bundled_engine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "custom-uci-engine"
+    executable.write_text("fake", encoding="utf-8")
+
+    def unexpected_bundle_lookup() -> str | None:
+        raise AssertionError("the bundle must not replace an explicit engine")
+
+    monkeypatch.setattr(factory, "resolve_bundled_stockfish", unexpected_bundle_lookup)
+
+    assert resolve_stockfish_path(str(executable)) == str(executable)
+
+
+def test_bundled_engine_wins_over_system_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(factory, "resolve_bundled_stockfish", lambda: "/bundle/stockfish")
+
+    def unexpected_path_lookup(_name: str) -> str | None:
+        raise AssertionError("PATH must not replace the bundled default")
+
+    monkeypatch.setattr(factory.shutil, "which", unexpected_path_lookup)
+
+    assert resolve_stockfish_path(None) == "/bundle/stockfish"
+
+
+def test_system_path_is_fallback_when_platform_has_no_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def system_engine_path(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    monkeypatch.setattr(factory, "resolve_bundled_stockfish", lambda: None)
+    monkeypatch.setattr(factory.shutil, "which", system_engine_path)
+
+    assert resolve_stockfish_path(None) == "/usr/bin/stockfish"
 
 
 def test_engine_validation_starts_and_closes_temporary_adapter(tmp_path: Path) -> None:

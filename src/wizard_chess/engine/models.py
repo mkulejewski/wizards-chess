@@ -29,7 +29,7 @@ class EngineEvaluation:
     def display(self) -> str:
         """Return compact user-facing score text."""
         if self.mate_in is not None:
-            return f"M{self.mate_in:+d}"
+            return f"M{self.mate_in}" if self.mate_in >= 0 else f"-M{abs(self.mate_in)}"
         assert self.score_cp is not None
         return f"{self.score_cp / 100:+.2f}"
 
@@ -88,11 +88,13 @@ class PositionAnalysis:
 
 
 def evaluation_share(evaluation: EngineEvaluation | None) -> float:
-    """Map evaluation to a stable 0..1 White share for UI bars and future LEDs."""
+    """Map evaluation to a bounded 0..1 White share using a symmetric curve."""
     if evaluation is None:
         return 0.5
     if evaluation.mate_in is not None:
         return 1.0 if evaluation.mate_in >= 0 else 0.0
     assert evaluation.score_cp is not None
-    capped = max(-1_000, min(1_000, evaluation.score_cp))
-    return 0.5 + capped / 2_000
+    # This smooth rational sigmoid keeps very large engine scores strictly
+    # within the endpoints and preserves exact color symmetry.
+    score = evaluation.score_cp
+    return 0.5 + 0.5 * score / (abs(score) + 400.0)

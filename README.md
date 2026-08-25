@@ -38,8 +38,9 @@ CLI / GUI / English voice / Polish voice / script / engine reply
 - `application` coordinates all moves, clocks, scripts, autosave, engine moves, and adapters.
 - `engine` contains the replaceable engine port, lazy Stockfish/UCI adapter, normalized
   White-perspective evaluations, candidate lines, and deterministic fake.
-- `analysis` replays copies of games, classifies moves, calculates transparent statistics,
-  and persists optional versioned annotations.
+- `analysis` owns live-result orchestration and the temporary per-game cache, and separately
+  replays copies of games, classifies moves, calculates statistics, and persists optional
+  versioned annotations.
 - `speech` owns bounded capture, recognizers, English/Polish normalization, confidence data,
   confirmation policy, and test doubles.
 - `gui` renders only authoritative snapshots and runs voice, live analysis, engine replies,
@@ -81,8 +82,11 @@ The GUI provides:
 - move history plus a ply slider for inspecting old positions without changing the live game;
 - Game Setup/New Game, Engine Preferences, Undo, Redo, FEN load/copy, and PGN import/export;
 - optional clock start/pause/reset and English/Polish voice-language selection;
-- non-blocking live evaluation, MultiPV candidates, principal variation, and evaluation bar;
+- non-blocking fixed-time or continuous live evaluation, principal variation, and a vertical
+  White/Black evaluation sidebar;
+- cached historical evaluations and an in-window advantage graph after the game ends;
 - non-blocking engine opponent replies and post-game analysis with progress and summaries;
+- Undo remains available while an engine is thinking and cancels the pending engine result;
 - visible, recoverable errors when voice, microphone, model, or engine is unavailable.
 
 Moves accept SAN (`e4`, `Nf3`, `exd5`, `O-O`, `e8=Q`) and coordinate forms (`e2 e4`,
@@ -95,25 +99,76 @@ as a fake move.
 
 ## Stockfish
 
-Install Stockfish using the operating system package manager or an official compatible
-distribution. Wizard Chess does not bundle a binary. The normal graphical workflow is:
+Wizard Chess bundles the official Stockfish 18 baseline build for Linux x86-64. The compressed
+asset is verified and extracted on first use to
+`$XDG_CACHE_HOME/wizard-chess/engines` or `~/.cache/wizard-chess/engines`; it is not added to or
+allowed to mutate the process-wide `PATH`. Platforms for which a bundle is not present retain
+system `PATH` discovery and the graphical executable selector. The normal graphical workflow is:
 
 1. Launch `uv run wizard-chess`.
-2. Open **Preferences…** and select the Stockfish executable if it is not already on `PATH`.
+2. Leave the executable blank to use automatic discovery, or open **Preferences…** and select a
+   different Stockfish or compatible UCI executable.
 3. Use **Test Engine** to validate the executable.
 4. In **Game Setup**, choose Human or Stockfish for White and Black.
 5. Choose strength and either **Fixed analysis time per move** or **Game-clock time
    management**. Clock-managed Stockfish requires the game clock and receives both remaining
    times and increments on every move.
-6. Remember the setup and choose whether to show Game Setup or reuse it automatically.
+6. Choose **Disabled**, **Fixed time**, or **Continuous live** displayed-position analysis.
+   Live analysis has its own maximum depth and works with any Human/Stockfish side pairing.
+7. Remember the setup and choose whether to show Game Setup or reuse it automatically.
 
-Engine Preferences also contains a separate after-game analysis budget, live analysis,
-MultiPV, depth, threads, hash size, and an optional local Syzygy directory. Syzygy files are
-not bundled or downloaded; an unavailable or unsupported directory falls back to normal
-search. The
-preferences are persisted in Wizard Chess's existing XDG-backed `settings.json`; future starts
-then require only `uv run wizard-chess`. Choosing Stockfish as either player enables the engine
-implicitly. If no path is saved, Wizard Chess discovers `stockfish` on `PATH`.
+Engine Preferences also contains the displayed-position analysis mode, separate fixed-time
+and live-depth budgets, MultiPV, depth, threads, hash size, and an optional local Syzygy
+directory. Syzygy files are not bundled or downloaded; an unavailable or unsupported
+directory falls back to normal search. The preferences are persisted in Wizard Chess's
+existing XDG-backed `settings.json`; future starts then require only `uv run wizard-chess`.
+Choosing Stockfish as either player or enabling analysis enables the engine implicitly. If no
+path is saved, Wizard Chess uses the matching bundled Stockfish and otherwise discovers
+`stockfish` on `PATH`.
+
+Engine executable resolution is deliberately separate from configuration precedence:
+
+```text
+explicit environment or saved Preferences path
+> verified bundled Stockfish for this OS and CPU
+> stockfish discovered on the system PATH
+> unavailable with graceful fallback to ordinary chess
+```
+
+An explicit selection is never silently replaced by the bundle when it later becomes invalid.
+The current bundle is the unmodified official Stockfish 18 Linux x86-64 baseline executable,
+recompressed with XZ for repository distribution. Its exact executable/archive checksums,
+GPLv3 license, authors, and reproducible source pointer live under
+`src/wizard_chess/engine/bundled/stockfish-18/` and in `THIRD_PARTY_NOTICES.md`.
+
+### Live engine analysis
+
+Displayed-position analysis is independent of who controls White and Black:
+
+- **Disabled** starts no position-analysis search.
+- **Fixed time** preserves the earlier bounded request for each newly displayed position.
+- **Continuous live** starts one UCI streaming search, publishes only useful new maximum
+  depths, and stops at the live maximum depth or when the displayed position changes.
+
+The vertical bar is always White-centric: `+0.35` means a 0.35-pawn White advantage and
+`-1.42` means a 1.42-pawn Black advantage. `M3` is mate for White and `-M2` is mate for Black.
+The bar uses a bounded nonlinear mapping, so large scores approach a fully winning side
+without treating centipawns as a linear percentage.
+
+The deepest result for every visited position is kept in memory for the current game. Moving
+the history slider displays that cached result immediately and resumes live search if its depth
+is still below the configured maximum. The cache remains after checkmate, draw, or resignation,
+then is discarded on New Game, FEN/PGN replacement, or session close. It is never written to a
+database or settings file.
+
+After a game ends, the graph remains hidden until **Analyse game** has successfully completed
+the full fixed post-game analysis. It plots the before/after evaluations from that completed
+analysis—not the temporary in-game live cache—so partial live depths cannot distort the game
+summary. Missing post-game evaluations remain gaps rather than becoming false zero values;
+mate is mapped only for display to a bounded graph endpoint. Click a graph region, or use the
+existing history slider, to navigate the board and sidebar together. Live analysis intentionally
+uses CPU continuously until its depth target, but all engine communication remains outside the
+Qt event thread and only one position is searched at a time.
 
 ### Advanced environment configuration
 
@@ -123,12 +178,14 @@ one-shot overrides. For example:
 ```bash
 WIZARD_CHESS_ENGINE_ENABLED=true \
 WIZARD_CHESS_ENGINE_PATH=/usr/bin/stockfish \
-WIZARD_CHESS_ANALYSIS_ENABLED=true \
+WIZARD_CHESS_ANALYSIS_MODE=live \
+WIZARD_CHESS_LIVE_ANALYSIS_MAX_DEPTH=22 \
 uv run wizard-chess
 ```
 
-If no path is supplied, enabled mode tries `stockfish` on `PATH`. Configuration is external;
-there is no platform-specific hard-coded path.
+If no path is supplied, enabled mode tries the platform bundle and then `stockfish` on `PATH`.
+Bundle lookup is based on the detected OS and CPU rather than a developer-specific absolute
+path.
 
 Configuration precedence is:
 
@@ -145,8 +202,10 @@ launching the application.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `WIZARD_CHESS_ENGINE_ENABLED` | `false` | Enable the lazy Stockfish adapter |
-| `WIZARD_CHESS_ENGINE_PATH` | discovered | UCI executable path |
-| `WIZARD_CHESS_ANALYSIS_ENABLED` | engine setting | Live analysis |
+| `WIZARD_CHESS_ENGINE_PATH` | automatic | Explicit UCI executable; otherwise bundle then `PATH` |
+| `WIZARD_CHESS_ANALYSIS_MODE` | `off` | `off`, `fixed_time`, or `live` |
+| `WIZARD_CHESS_LIVE_ANALYSIS_MAX_DEPTH` | `20` | Continuous-analysis stop depth |
+| `WIZARD_CHESS_ANALYSIS_ENABLED` | unset | Legacy boolean mapped to `fixed_time`/`off` |
 | `WIZARD_CHESS_PLAYER_MOVE_ANALYSIS_TIME_MS` | `500` | Fixed Stockfish-player time per move |
 | `WIZARD_CHESS_POST_GAME_ANALYSIS_TIME_MS` | `500` | Completed-game time per position |
 | `WIZARD_CHESS_STOCKFISH_PLAYER_MODE` | `fixed_analysis_time` | `fixed_analysis_time` or `game_clock` |
@@ -266,9 +325,11 @@ Clock timing uses a monotonic source and is independent of GUI frame rate.
 ## Analysis heuristics
 
 All scores are normalized from White's perspective. Mate scores remain mate scores rather
-than arbitrary raw UCI values. Post-game analysis evaluates positions on copies, caches exact
-FENs, records before/after evaluation, preferred move, principal variation, and mover-relative
-centipawn loss, and never changes the live game.
+than arbitrary raw UCI values. Live results use a position key that retains side to move,
+castling, en-passant, and the fifty-move clock while ignoring only the irrelevant fullmove
+number. Fixed post-game analysis evaluates positions on copies, caches exact FENs, records
+before/after evaluation, preferred move, principal variation, and mover-relative centipawn
+loss, and never changes the live game.
 
 Wizard Chess classifications are documented project heuristics, not Chess.com or Lichess
 replicas:
@@ -309,10 +370,11 @@ uv run pyright
 
 ## Known limitations
 
-- Real Stockfish and microphone/model acceptance depend on locally installed external systems;
-  automated tests use controlled fakes.
-- Engine cancellation marks results stale immediately, while an in-flight synchronous UCI call
-  may finish before the worker exits.
+- Real Stockfish acceptance outside the bundled Linux x86-64 target and microphone/model
+  acceptance depend on local external systems; automated engine tests use controlled fakes.
+- Fixed-time engine cancellation marks results stale immediately, while an in-flight bounded
+  synchronous UCI call may finish before that worker exits. Continuous live search uses the
+  streaming UCI cancellation path.
 - Confirmation policy is modeled and testable, but the current GUI executes uniquely resolved
   voice moves directly; ambiguous commands are rejected for clarification.
 - There is no wake word, speech synthesis, speaker identification, online play, cloud account,

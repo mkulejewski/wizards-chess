@@ -9,6 +9,7 @@ from typing import Protocol
 from wizard_chess.configuration import EngineSettings
 from wizard_chess.domain.exceptions import EngineUnavailableError
 from wizard_chess.engine.stockfish import StockfishEngine
+from wizard_chess.persistence.engine_bundle import resolve_bundled_stockfish
 
 
 class StartableEngine(Protocol):
@@ -23,7 +24,7 @@ ValidationEngineFactory = Callable[[EngineSettings], StartableEngine]
 
 
 def create_stockfish_engine(settings: EngineSettings) -> StockfishEngine | None:
-    """Return a lazy adapter when enabled, discovering Stockfish on PATH if needed."""
+    """Return a lazy adapter, preferring configured and then bundled Stockfish."""
     if not settings.enabled:
         return None
     path = settings.path or resolve_stockfish_path(None)
@@ -31,12 +32,15 @@ def create_stockfish_engine(settings: EngineSettings) -> StockfishEngine | None:
 
 
 def resolve_stockfish_path(configured_path: str | None) -> str | None:
-    """Resolve an explicit executable or discover ``stockfish`` on ``PATH``."""
+    """Resolve an explicit executable, bundled Stockfish, or the system ``PATH``."""
     if configured_path:
         candidate = Path(configured_path).expanduser()
         if candidate.parent != Path("."):
             return str(candidate) if candidate.is_file() else None
         return shutil.which(configured_path)
+    bundled_path = resolve_bundled_stockfish()
+    if bundled_path is not None:
+        return bundled_path
     return shutil.which("stockfish")
 
 
@@ -47,7 +51,9 @@ def validate_stockfish_engine(
     """Perform a minimal UCI startup test and always close its temporary process."""
     path = resolve_stockfish_path(settings.path)
     if path is None:
-        requested = f" at {settings.path!r}" if settings.path else " on PATH"
+        requested = (
+            f" at {settings.path!r}" if settings.path else " in the application bundle or on PATH"
+        )
         raise EngineUnavailableError(f"Stockfish executable was not found{requested}")
     engine = engine_factory(replace(settings, enabled=True, path=path))
     try:

@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from wizard_chess.configuration import (
     ApplicationSettings,
+    EngineAnalysisMode,
     EngineSettings,
     EngineStrength,
     StockfishPlayerMode,
@@ -51,7 +52,7 @@ class EnginePreferencesDialog(QDialog):
         self.setMinimumWidth(520)
 
         self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("Discover stockfish on PATH")
+        self.path_edit.setPlaceholderText("Automatic: bundled Stockfish, then system PATH")
         self.browse_button = QPushButton("Browse…")
         self.test_button = QPushButton("Test Engine")
 
@@ -77,7 +78,18 @@ class EnginePreferencesDialog(QDialog):
             "Game-clock time management",
             StockfishPlayerMode.GAME_CLOCK.value,
         )
-        self.live_analysis_checkbox = QCheckBox("Enable live analysis")
+        self.analysis_mode_combo = QComboBox()
+        self.analysis_mode_combo.addItem("Disabled", EngineAnalysisMode.OFF.value)
+        self.analysis_mode_combo.addItem(
+            "Fixed time per displayed position",
+            EngineAnalysisMode.FIXED_TIME.value,
+        )
+        self.analysis_mode_combo.addItem(
+            "Continuous live analysis",
+            EngineAnalysisMode.LIVE.value,
+        )
+        self.live_depth_spin = QSpinBox()
+        self.live_depth_spin.setRange(1, 100)
 
         self.multipv_spin = QSpinBox()
         self.multipv_spin.setRange(1, 20)
@@ -104,15 +116,21 @@ class EnginePreferencesDialog(QDialog):
         self.syzygy_clear_button.clicked.connect(self.syzygy_path_edit.clear)
         self.test_button.clicked.connect(self._test_engine)
         self.player_mode_combo.currentIndexChanged.connect(self._update_mode_controls)
+        self.analysis_mode_combo.currentIndexChanged.connect(self._update_mode_controls)
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
 
     def selected_settings(self) -> ApplicationSettings:
         """Build typed persistent preferences from the current widget values."""
+        analysis_mode = EngineAnalysisMode(str(self.analysis_mode_combo.currentData()))
         engine = EngineSettings(
-            enabled=(self._base_settings.engine.enabled or self.live_analysis_checkbox.isChecked()),
+            enabled=(
+                self._base_settings.engine.enabled or analysis_mode is not EngineAnalysisMode.OFF
+            ),
             path=self.path_edit.text().strip() or None,
-            analysis_enabled=self.live_analysis_checkbox.isChecked(),
+            analysis_mode=analysis_mode,
+            analysis_enabled=analysis_mode is not EngineAnalysisMode.OFF,
+            live_analysis_max_depth=self.live_depth_spin.value(),
             player_mode=StockfishPlayerMode(str(self.player_mode_combo.currentData())),
             player_move_analysis_time_ms=max(1, round(self.think_time_spin.value() * 1000)),
             post_game_analysis_time_ms=max(1, round(self.post_game_time_spin.value() * 1000)),
@@ -143,7 +161,8 @@ class EnginePreferencesDialog(QDialog):
         defaults_form.addRow("Stockfish player mode:", self.player_mode_combo)
         defaults_form.addRow("Fixed bot analysis time:", self.think_time_spin)
         defaults_form.addRow("After-game analysis time:", self.post_game_time_spin)
-        defaults_form.addRow(self.live_analysis_checkbox)
+        defaults_form.addRow("Displayed-position analysis:", self.analysis_mode_combo)
+        defaults_form.addRow("Live maximum depth:", self.live_depth_spin)
         layout.addWidget(defaults_group)
 
         advanced_group = QGroupBox("Advanced")
@@ -180,7 +199,10 @@ class EnginePreferencesDialog(QDialog):
         )
         self.think_time_spin.setValue(settings.player_move_analysis_time_ms / 1000)
         self.post_game_time_spin.setValue(settings.post_game_analysis_time_ms / 1000)
-        self.live_analysis_checkbox.setChecked(settings.analysis_enabled)
+        self.analysis_mode_combo.setCurrentIndex(
+            max(0, self.analysis_mode_combo.findData(settings.analysis_mode.value))
+        )
+        self.live_depth_spin.setValue(settings.live_analysis_max_depth)
         self.multipv_spin.setValue(settings.multipv)
         self.depth_spin.setValue(settings.analysis_depth or 0)
         self.threads_spin.setValue(settings.threads)
@@ -212,6 +234,9 @@ class EnginePreferencesDialog(QDialog):
     def _update_mode_controls(self) -> None:
         self.think_time_spin.setEnabled(
             self.player_mode_combo.currentData() == StockfishPlayerMode.FIXED_ANALYSIS_TIME.value
+        )
+        self.live_depth_spin.setEnabled(
+            self.analysis_mode_combo.currentData() == EngineAnalysisMode.LIVE.value
         )
 
     def _test_engine(self) -> None:
