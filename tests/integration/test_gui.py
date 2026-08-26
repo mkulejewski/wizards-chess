@@ -21,7 +21,9 @@ from wizard_chess.configuration import (
     PlayerKind,
     PlayerSettings,
 )
+from wizard_chess.domain.exceptions import AnalysisCancelledError
 from wizard_chess.domain.move import ChessMove
+from wizard_chess.domain.results import GameStatus
 from wizard_chess.engine.base import AnalysisUpdate
 from wizard_chess.engine.mock import FakeEngine
 from wizard_chess.engine.models import (
@@ -117,6 +119,36 @@ class GatedLiveEngine(FakeEngine):
                 ),
             )
         )
+
+
+class GatedPostGameEngine(FakeEngine):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+        self.cancelled = Event()
+
+    def analyse_position(
+        self,
+        board: chess.Board,
+        *,
+        count: int | None = None,
+        time_ms: int | None = None,
+        cancel_requested: CancellationCheck | None = None,
+    ) -> PositionAnalysis:
+        del count, time_ms
+        self.started.set()
+        while not self.release.wait(0.005):
+            if cancel_requested is not None and cancel_requested():
+                self.cancelled.set()
+                raise AnalysisCancelledError("Game analysis was cancelled")
+        if cancel_requested is not None and cancel_requested():
+            self.cancelled.set()
+            raise AnalysisCancelledError("Game analysis was cancelled")
+        return super().analyse_position(board, cancel_requested=cancel_requested)
+
+    def cancel_pending(self) -> None:
+        self.release.set()
 
 
 class GatedEngineMoves(FakeEngine):
@@ -225,6 +257,94 @@ def test_gui_typed_move_uses_shared_command_path(
     assert window.status_label.text() == "Black to move"
     assert window.command_input.text() == ""
 
+    window.close()
+
+
+def test_gui_draw_button_offers_rejects_on_move_and_accepts_on_second_click(
+    qt_application: QApplication,
+) -> None:
+    del qt_application
+    session = GameSession()
+    window = MainWindow(session)
+
+    assert window.draw_button.isEnabled()
+    assert window.draw_button.text() == "Offer Draw"
+    assert not window.reject_draw_button.isEnabled()
+    assert window.resign_button.isEnabled()
+
+    QTest.mouseClick(window.draw_button, Qt.MouseButton.LeftButton)
+    assert session.snapshot().pending_draw_offer is not None
+    assert window.draw_button.text() == "Accept Draw"
+    assert window.reject_draw_button.isEnabled()
+
+    QTest.mouseClick(window.reject_draw_button, Qt.MouseButton.LeftButton)
+    assert session.snapshot().pending_draw_offer is None
+    assert not window.draw_button.isEnabled()
+    assert not window.reject_draw_button.isEnabled()
+
+    window.command_input.setText("e4")
+    QTest.mouseClick(window.play_button, Qt.MouseButton.LeftButton)
+    assert session.snapshot().pending_draw_offer is None
+    assert not session.snapshot().result.is_over
+    assert window.draw_button.text() == "Offer Draw"
+    assert window.draw_button.isEnabled()
+
+    QTest.mouseClick(window.draw_button, Qt.MouseButton.LeftButton)
+    QTest.mouseClick(window.draw_button, Qt.MouseButton.LeftButton)
+    assert session.snapshot().result.status is GameStatus.AGREED_DRAW
+    assert not window.draw_button.isEnabled()
+    assert not window.reject_draw_button.isEnabled()
+    assert not window.resign_button.isEnabled()
+
+    window.close()
+
+
+def test_gui_resign_button_and_human_only_availability(
+    qt_application: QApplication,
+) -> None:
+    del qt_application
+    engine_to_move_settings = ApplicationSettings(
+        players=PlayerSettings(white_kind=PlayerKind.ENGINE)
+    )
+    engine_session = GameSession(
+        settings=engine_to_move_settings,
+        engine_factory=lambda _settings: None,
+    )
+    engine_window = MainWindow(engine_session)
+
+    assert not engine_window.draw_button.isEnabled()
+    assert not engine_window.reject_draw_button.isEnabled()
+    assert not engine_window.resign_button.isEnabled()
+    engine_window.close()
+
+    human_session = GameSession()
+    human_window = MainWindow(human_session)
+    QTest.mouseClick(human_window.resign_button, Qt.MouseButton.LeftButton)
+
+    assert human_session.snapshot().result.status is GameStatus.RESIGNED
+    assert not human_window.resign_button.isEnabled()
+    assert not human_window.draw_button.isEnabled()
+    assert not human_window.reject_draw_button.isEnabled()
+    human_window.close()
+
+
+def test_gui_draw_button_claims_rules_draw_against_engine(
+    qt_application: QApplication,
+) -> None:
+    del qt_application
+    settings = ApplicationSettings(players=PlayerSettings(black_kind=PlayerKind.ENGINE))
+    session = GameSession(settings=settings, engine_factory=lambda _settings: None)
+    session.load_fen("4k2r/8/8/8/8/8/8/R3K3 w - - 100 51")
+    window = MainWindow(session)
+
+    assert window.draw_button.text() == "Claim Draw"
+    assert window.draw_button.isEnabled()
+    assert not window.reject_draw_button.isEnabled()
+
+    QTest.mouseClick(window.draw_button, Qt.MouseButton.LeftButton)
+
+    assert session.snapshot().result.status is GameStatus.FIFTY_MOVE_RULE_CLAIM
+    assert not window.draw_button.isEnabled()
     window.close()
 
 
@@ -521,6 +641,67 @@ def test_gui_post_game_analysis_reports_progress_without_mutating_game(
     assert "1. e4" in window.analysis_view.toPlainText()
     assert session.snapshot().fen == live_fen
     assert window.evaluation_graph.isHidden()
+    window.close()
+
+
+def test_post_game_analysis_preempts_live_analysis_after_resignation(
+    qt_application: QApplication,
+) -> None:
+    engine = GatedLiveEngine()
+    settings = ApplicationSettings(
+        engine=EngineSettings(
+            enabled=True,
+            analysis_mode=EngineAnalysisMode.LIVE,
+            live_analysis_max_depth=10,
+        )
+    )
+    session = GameSession(settings=settings, engine=engine)
+    session.play_text("e4")
+    window = MainWindow(session)
+    assert engine.live_started.wait(1.0)
+
+    session.play_text("resign")
+    window.refresh()
+    assert session.snapshot().result.status is GameStatus.RESIGNED
+
+    QTest.mouseClick(window.analyse_game_button, Qt.MouseButton.LeftButton)
+
+    assert engine.live_cancelled.wait(1.0)
+    wait_for_gui(qt_application, lambda: not window.game_analysis_active)
+    assert "White ACPL" in window.analysis_view.toPlainText()
+    assert "1. e4" in window.analysis_view.toPlainText()
+    window.close()
+
+
+def test_new_game_remains_enabled_and_cancels_post_game_analysis(
+    qt_application: QApplication,
+) -> None:
+    engine = GatedPostGameEngine()
+    settings = ApplicationSettings(engine=EngineSettings(enabled=True))
+    session = GameSession(
+        settings=settings,
+        engine=engine,
+        engine_factory=lambda _settings: None,
+    )
+    session.play_text("e4")
+    session.play_text("resign")
+    window = MainWindow(session)
+
+    QTest.mouseClick(window.analyse_game_button, Qt.MouseButton.LeftButton)
+    assert engine.started.wait(1.0)
+    assert window.game_analysis_active
+    assert window.new_button.isEnabled()
+    assert not window.command_input.isEnabled()
+
+    QTest.mouseClick(window.new_button, Qt.MouseButton.LeftButton)
+
+    assert engine.cancelled.wait(1.0)
+    assert not window.game_analysis_active
+    setup_dialog = window.game_setup_dialog
+    assert setup_dialog is not None
+    setup_dialog.accept()
+    assert session.snapshot().move_history == ()
+    assert not session.snapshot().result.is_over
     window.close()
 
 

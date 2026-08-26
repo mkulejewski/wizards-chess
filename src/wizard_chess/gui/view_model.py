@@ -29,4 +29,7 @@ def format_game_status(snapshot: PositionSnapshot) -> str:
         if result.winner is not None:
             return f"{label} — {result.winner.value.title()} wins"
         return f"{label} — Draw"
+    if snapshot.pending_draw_offer is not None:
+        proposer = snapshot.pending_draw_offer.value.title()
+        return f"{snapshot.turn.value.title()} to move — Draw offered by {proposer}"
     return f"{snapshot.turn.value.title()} to move"

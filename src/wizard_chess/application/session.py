@@ -21,9 +21,10 @@ from wizard_chess.configuration import (
     VoiceLanguage,
 )
 from wizard_chess.domain.events import MoveAnnotation, MoveExecuted
+from wizard_chess.domain.exceptions import GameTerminationError
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
-from wizard_chess.domain.results import GameResult, PlayerColor
+from wizard_chess.domain.results import GameResult, GameStatus, PlayerColor
 from wizard_chess.engine.base import ChessEngine
 from wizard_chess.engine.factory import create_stockfish_engine
 from wizard_chess.engine.models import EngineClockState, EngineDecision
@@ -46,7 +47,8 @@ Coordinate forms:
   e2 e4 | e2-e4 | e2 to e4 | move e2 to e4
   e7 e8 queen (promotion: queen, rook, bishop, knight, or q/r/b/n)
 Commands:
-  undo, redo, fen, pgn, new game, resign, draw, save, repeat, legal, help, quit
+  undo, redo, fen, pgn, new game, resign, draw, propose draw, accept draw,
+  reject draw, save, repeat, legal, help, quit
 Voice input (terminal):
   voice"""
 
@@ -68,6 +70,10 @@ class PositionSnapshot:
     clock: ClockSnapshot | None = None
     viewed_ply: int | None = None
     revision: int = 0
+    pending_draw_offer: PlayerColor | None = None
+    can_resign: bool = False
+    can_request_draw: bool = False
+    can_reject_draw: bool = False
 
     def piece_at(self, square: str) -> str | None:
         """Return a FEN piece symbol at a square, if occupied."""
@@ -189,6 +195,8 @@ class GameSession:
 
     def _snapshot_for_game(self, game: ChessGame) -> PositionSnapshot:
         board = game.board
+        result = game.result()
+        is_live_game = game is self._game
         pieces = tuple(
             sorted(
                 (chess.square_name(square), piece.symbol())
@@ -201,7 +209,7 @@ class GameSession:
             move_history=game.move_history(),
             last_move=game.last_move(),
             turn=game.turn,
-            result=game.result(),
+            result=result,
             fen=game.fen(),
             pgn=game.to_pgn(),
             can_undo=game.can_undo,
@@ -212,6 +220,29 @@ class GameSession:
                 else None
             ),
             revision=self._revision,
+            pending_draw_offer=(game.pending_draw_offer if is_live_game else None),
+            can_resign=(
+                is_live_game
+                and not result.is_over
+                and self._player_kind(game.turn) is PlayerKind.HUMAN
+            ),
+            can_request_draw=(
+                is_live_game
+                and not result.is_over
+                and (
+                    (result.can_claim_draw and self._player_kind(game.turn) is PlayerKind.HUMAN)
+                    or (
+                        self._draw_actions_available()
+                        and (game.pending_draw_offer is not None or game.can_propose_draw)
+                    )
+                )
+            ),
+            can_reject_draw=(
+                is_live_game
+                and not result.is_over
+                and self._draw_actions_available()
+                and game.pending_draw_offer is not None
+            ),
         )
 
     def play_text(self, text: str) -> SessionResult:
@@ -444,9 +475,71 @@ class GameSession:
         return self.play_move(decision.move, engine_decision=decision)
 
     def engine_controls_turn(self) -> bool:
-        players = self.settings.players
-        kind = players.white_kind if self._game.turn.value == "white" else players.black_kind
-        return kind is PlayerKind.ENGINE
+        return self._player_kind(self._game.turn) is PlayerKind.ENGINE
+
+    def resign(self) -> SessionResult:
+        """Resign the human-controlled side whose turn it is."""
+        if self._game.is_game_over():
+            raise GameTerminationError("The game is already over")
+        if self._player_kind(self._game.turn) is not PlayerKind.HUMAN:
+            raise GameTerminationError(translate("session.resign_human_only", self.voice_language))
+        result = self._game.resign()
+        self._clock.pause()
+        self._revision += 1
+        self._autosave()
+        winner = result.winner.value.title() if result.winner is not None else "Unknown"
+        return SessionResult(
+            message=translate("session.resigned", self.voice_language, winner=winner)
+        )
+
+    def request_draw(self) -> SessionResult:
+        """Claim an available draw, otherwise offer or accept one by agreement."""
+        if self._game.pending_draw_offer is not None:
+            return self.accept_draw()
+        return self.propose_draw()
+
+    def propose_draw(self) -> SessionResult:
+        """Claim an available rules draw or make a non-terminal human offer."""
+        self._ensure_game_ongoing()
+        if self._game.pending_draw_offer is not None:
+            raise GameTerminationError(translate("session.draw_offer_pending", self.voice_language))
+        if self._game.result().can_claim_draw:
+            self._ensure_human_turn()
+            return self._claim_draw()
+        self._ensure_draw_actions_available()
+        if not self._game.can_propose_draw:
+            raise GameTerminationError(
+                translate("session.draw_already_offered_here", self.voice_language)
+            )
+        proposer = self._game.propose_draw()
+        self._revision += 1
+        return SessionResult(
+            message=translate(
+                "session.draw_offered",
+                self.voice_language,
+                player=self._player_name(proposer),
+            )
+        )
+
+    def accept_draw(self) -> SessionResult:
+        """Accept an unresolved human draw offer and end the game."""
+        self._ensure_draw_actions_available()
+        if self._game.pending_draw_offer is None:
+            raise GameTerminationError(translate("session.no_draw_offer", self.voice_language))
+        self._game.accept_draw()
+        self._clock.pause()
+        self._revision += 1
+        self._autosave()
+        return SessionResult(message=translate("session.draw", self.voice_language))
+
+    def reject_draw(self) -> SessionResult:
+        """Reject an unresolved human draw offer without changing the position."""
+        self._ensure_draw_actions_available()
+        if self._game.pending_draw_offer is None:
+            raise GameTerminationError(translate("session.no_draw_offer", self.voice_language))
+        self._game.reject_draw()
+        self._revision += 1
+        return SessionResult(message=translate("session.draw_rejected", self.voice_language))
 
     def start_clock(self) -> None:
         """Start or resume the optional clock for the authoritative side to move."""
@@ -518,20 +611,15 @@ class GameSession:
                 move_event=event,
             )
         if command is CommandName.RESIGN:
-            result = self._game.resign()
-            self._clock.pause()
-            self._revision += 1
-            self._autosave()
-            winner = result.winner.value.title() if result.winner is not None else "Unknown"
-            return SessionResult(
-                message=translate("session.resigned", self.voice_language, winner=winner)
-            )
+            return self.resign()
         if command is CommandName.DRAW:
-            self._game.agree_draw()
-            self._clock.pause()
-            self._revision += 1
-            self._autosave()
-            return SessionResult(message=translate("session.draw", self.voice_language))
+            return self.request_draw()
+        if command is CommandName.PROPOSE_DRAW:
+            return self.propose_draw()
+        if command is CommandName.ACCEPT_DRAW:
+            return self.accept_draw()
+        if command is CommandName.REJECT_DRAW:
+            return self.reject_draw()
         if command is CommandName.SAVE:
             return SessionResult(
                 message=translate(
@@ -576,6 +664,45 @@ class GameSession:
 
     def _new_configured_game(self) -> ChessGame:
         return ChessGame(metadata=self._game_metadata(self.settings))
+
+    def _player_kind(self, color: PlayerColor) -> PlayerKind:
+        players = self.settings.players
+        return players.white_kind if color is PlayerColor.WHITE else players.black_kind
+
+    def _player_name(self, color: PlayerColor) -> str:
+        players = self.settings.players
+        return players.white_name if color is PlayerColor.WHITE else players.black_name
+
+    def _draw_actions_available(self) -> bool:
+        players = self.settings.players
+        return players.white_kind is PlayerKind.HUMAN and players.black_kind is PlayerKind.HUMAN
+
+    def _ensure_draw_actions_available(self) -> None:
+        self._ensure_game_ongoing()
+        if not self._draw_actions_available():
+            raise GameTerminationError(translate("session.draw_humans_only", self.voice_language))
+
+    def _ensure_game_ongoing(self) -> None:
+        if self._game.is_game_over():
+            raise GameTerminationError("The game is already over")
+
+    def _ensure_human_turn(self) -> None:
+        if self._player_kind(self._game.turn) is not PlayerKind.HUMAN:
+            raise GameTerminationError(
+                translate("session.draw_claim_human_only", self.voice_language)
+            )
+
+    def _claim_draw(self) -> SessionResult:
+        result = self._game.claim_draw()
+        self._clock.pause()
+        self._revision += 1
+        self._autosave()
+        key = (
+            "session.draw_claimed_fifty"
+            if result.status is GameStatus.FIFTY_MOVE_RULE_CLAIM
+            else "session.draw_claimed_threefold"
+        )
+        return SessionResult(message=translate(key, self.voice_language))
 
     @staticmethod
     def _game_metadata(settings: ApplicationSettings) -> dict[str, str]:

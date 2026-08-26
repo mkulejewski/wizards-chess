@@ -145,6 +145,9 @@ class MainWindow(QMainWindow):
         self.preferences_button = QPushButton("Preferences…")
         self.undo_button = QPushButton("Undo")
         self.redo_button = QPushButton("Redo")
+        self.draw_button = QPushButton("Offer Draw")
+        self.reject_draw_button = QPushButton("Reject Draw")
+        self.resign_button = QPushButton("Resign")
         self.flip_button = QPushButton("Flip Board")
         self.fen_input = QLineEdit()
         self.load_fen_button = QPushButton("Load FEN")
@@ -249,6 +252,17 @@ class MainWindow(QMainWindow):
         self.undo_button.setEnabled(live_snapshot.can_undo)
         self.redo_button.setEnabled(live_snapshot.can_redo)
         live_input_enabled = self._viewed_ply is None and not live_snapshot.result.is_over
+        draw_button_text = "Offer Draw"
+        if live_snapshot.pending_draw_offer is not None:
+            draw_button_text = "Accept Draw"
+        elif live_snapshot.result.can_claim_draw:
+            draw_button_text = "Claim Draw"
+        self.draw_button.setText(draw_button_text)
+        self.draw_button.setEnabled(self._viewed_ply is None and live_snapshot.can_request_draw)
+        self.reject_draw_button.setEnabled(
+            self._viewed_ply is None and live_snapshot.can_reject_draw
+        )
+        self.resign_button.setEnabled(self._viewed_ply is None and live_snapshot.can_resign)
         self.board_widget.setEnabled(self._viewed_ply is None)
         self.command_input.setEnabled(live_input_enabled)
         self.play_button.setEnabled(live_input_enabled)
@@ -295,6 +309,9 @@ class MainWindow(QMainWindow):
         actions.addWidget(self.preferences_button)
         actions.addWidget(self.undo_button)
         actions.addWidget(self.redo_button)
+        actions.addWidget(self.draw_button)
+        actions.addWidget(self.reject_draw_button)
+        actions.addWidget(self.resign_button)
         actions.addWidget(self.flip_button)
         actions.addStretch()
         outer.addLayout(actions)
@@ -395,6 +412,9 @@ class MainWindow(QMainWindow):
         self.preferences_button.clicked.connect(self._open_preferences)
         self.undo_button.clicked.connect(self._undo)
         self.redo_button.clicked.connect(self._redo)
+        self.draw_button.clicked.connect(self._draw)
+        self.reject_draw_button.clicked.connect(self._reject_draw)
+        self.resign_button.clicked.connect(self._resign)
         self.flip_button.clicked.connect(self._flip)
         self.load_fen_button.clicked.connect(self._load_fen)
         self.copy_fen_button.clicked.connect(self._copy_fen)
@@ -522,14 +542,22 @@ class MainWindow(QMainWindow):
         self._set_interaction_enabled(True)
         self.refresh()
 
-    def _set_interaction_enabled(self, enabled: bool) -> None:
+    def _set_interaction_enabled(
+        self,
+        enabled: bool,
+        *,
+        keep_new_game_enabled: bool = False,
+    ) -> None:
         self.board_widget.setEnabled(enabled)
         self.command_input.setEnabled(enabled)
         self.play_button.setEnabled(enabled)
-        self.new_button.setEnabled(enabled)
+        self.new_button.setEnabled(enabled or keep_new_game_enabled)
         self.preferences_button.setEnabled(enabled)
         self.undo_button.setEnabled(enabled)
         self.redo_button.setEnabled(enabled)
+        self.draw_button.setEnabled(enabled)
+        self.reject_draw_button.setEnabled(enabled)
+        self.resign_button.setEnabled(enabled)
         self.flip_button.setEnabled(enabled)
         self.fen_input.setEnabled(enabled)
         self.load_fen_button.setEnabled(enabled)
@@ -547,6 +575,8 @@ class MainWindow(QMainWindow):
         self.voice_button.setEnabled(enabled)
 
     def _new_game(self) -> None:
+        if self._game_analysis_worker is not None:
+            self._cancel_game_analysis()
         self._open_game_setup()
 
     def show_startup_setup(self) -> None:
@@ -693,6 +723,21 @@ class MainWindow(QMainWindow):
         self._cancel_move_worker()
         self._perform_state_action(
             lambda: f"Redid: {self.session.redo().san}",
+        )
+
+    def _draw(self) -> None:
+        self._perform_state_action(
+            lambda: self.session.request_draw().message or "Done.",
+        )
+
+    def _reject_draw(self) -> None:
+        self._perform_state_action(
+            lambda: self.session.reject_draw().message or "Done.",
+        )
+
+    def _resign(self) -> None:
+        self._perform_state_action(
+            lambda: self.session.resign().message or "Done.",
         )
 
     def _perform_state_action(self, action: Callable[[], str]) -> None:
@@ -845,13 +890,10 @@ class MainWindow(QMainWindow):
         if engine is None or self._engine_failed:
             self._show_feedback("Configure Stockfish before analysing a game.")
             return
-        if (
-            self._engine_worker is not None
-            or self._live_analysis_worker is not None
-            or self._game_analysis_worker is not None
-        ):
+        if self._engine_worker is not None or self._game_analysis_worker is not None:
             self._show_feedback("The engine is already busy.")
             return
+        self._stop_live_analysis_for_game_analysis()
         worker = GameAnalysisWorker(
             engine,
             self.session.snapshot().pgn,
@@ -865,9 +907,33 @@ class MainWindow(QMainWindow):
         worker.failed.connect(self._on_game_analysis_failure)
         worker.finished.connect(self._on_game_analysis_finished)
         worker.finished.connect(worker.deleteLater)
-        self._set_interaction_enabled(False)
+        self._set_interaction_enabled(False, keep_new_game_enabled=True)
         self.engine_status_label.setText("Engine: Analysing game…")
         worker.start()
+
+    def _stop_live_analysis_for_game_analysis(self) -> None:
+        """Synchronously release the engine from live work for full-game analysis."""
+        worker = self._live_analysis_worker
+        if worker is None:
+            return
+        self.session.live_analysis.invalidate_selection()
+        if worker.isRunning():
+            worker.cancel(stop_engine=True)
+            worker.wait()
+        if self._live_analysis_worker is worker:
+            self._live_analysis_worker = None
+
+    def _cancel_game_analysis(self) -> None:
+        worker = self._game_analysis_worker
+        if worker is not None and worker.isRunning():
+            worker.cancel(stop_engine=True)
+            worker.wait()
+        self._game_analysis_worker = None
+        self._completed_game_analysis = None
+        self.evaluation_graph.setVisible(False)
+        self.engine_status_label.setText("Engine: Game analysis cancelled")
+        self._set_interaction_enabled(True)
+        self.refresh()
 
     def _on_game_analysis_progress(self, completed: int, total: int) -> None:
         self.engine_status_label.setText(f"Engine: Analysing game {completed}/{total}")

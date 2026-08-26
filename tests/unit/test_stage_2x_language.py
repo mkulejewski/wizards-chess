@@ -51,6 +51,10 @@ def test_polish_normalization_is_deterministic(transcript: str, normalized: str)
         ("nowa gra", CommandIntent(CommandName.NEW)),
         ("zapisz grę", CommandIntent(CommandName.SAVE)),
         ("poddaję się", CommandIntent(CommandName.RESIGN)),
+        ("remis", CommandIntent(CommandName.DRAW)),
+        ("zaproponuj remis", CommandIntent(CommandName.PROPOSE_DRAW)),
+        ("przyjmuję remis", CommandIntent(CommandName.ACCEPT_DRAW)),
+        ("odrzucam remis", CommandIntent(CommandName.REJECT_DRAW)),
     ],
 )
 def test_polish_parser_emits_language_independent_intents(
@@ -68,6 +72,23 @@ def test_english_and_polish_commands_resolve_to_the_same_move() -> None:
     assert isinstance(polish, ContextualMoveIntent)
     assert MoveResolver().resolve(english, ChessGame()) == ChessMove.from_uci("g1f3")
     assert MoveResolver().resolve(polish, ChessGame()) == ChessMove.from_uci("g1f3")
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("draw", CommandName.DRAW),
+        ("call it a draw", CommandName.DRAW),
+        ("propose a draw", CommandName.PROPOSE_DRAW),
+        ("i offer a draw", CommandName.PROPOSE_DRAW),
+        ("accept the draw", CommandName.ACCEPT_DRAW),
+        ("agree to draw", CommandName.ACCEPT_DRAW),
+        ("reject the draw", CommandName.REJECT_DRAW),
+        ("decline draw", CommandName.REJECT_DRAW),
+    ],
+)
+def test_english_draw_voice_variants(text: str, expected: CommandName) -> None:
+    assert LanguageCommandParser(VoiceLanguage.ENGLISH).parse(text) == CommandIntent(expected)
 
 
 def test_polish_pipeline_updates_the_shared_session_and_keeps_typed_san() -> None:

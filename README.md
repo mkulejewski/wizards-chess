@@ -129,6 +129,7 @@ The GUI provides:
   White/Black evaluation sidebar;
 - cached historical evaluations and an in-window advantage graph after the game ends;
 - non-blocking engine opponent replies and post-game analysis with progress and summaries;
+  **Analyse game** immediately preempts any ongoing live-position analysis;
 - Undo remains available while an engine is thinking and cancels the pending engine result;
 - visible, recoverable errors when voice, microphone, model, or engine is unavailable.
 
@@ -136,9 +137,19 @@ Moves accept SAN (`e4`, `Nf3`, `exd5`, `O-O`, `e8=Q`) and coordinate forms (`e2 
 `e2-e4`, `move e2 to e4`). Contextual phrases are resolved only against current legal moves;
 ambiguous phrases are rejected with legal origin squares rather than guessed.
 
-Application commands include `undo`, `redo`, `new game`, `resign`, `draw`, `save`, `repeat`,
-`fen`, `pgn`, `legal`, `help`, and `quit`. `draw` records an agreed draw; it is not represented
-as a fake move.
+Application commands include `undo`, `redo`, `new game`, `resign`, `draw`, `propose draw`,
+`accept draw`, `reject draw`, `save`, `repeat`, `fen`, `pgn`, `legal`, `help`, and `quit`.
+In a human-vs-human game, the first `draw` offers and a consecutive second `draw` accepts;
+an intervening legal move rejects the offer. English variants such as `offer a draw`,
+`accept the draw`, and `decline draw`, plus equivalent Polish phrases, use the same flow.
+The desktop **Offer Draw** button becomes **Accept Draw** while an offer is pending, and the
+answering player can use **Reject Draw**. Another offer is blocked while the rejected position
+remains unchanged; after any position change, an offer is possible again—even if play or history
+later returns to the same position. When threefold repetition or the fifty-move rule is claimable,
+the button becomes **Claim Draw** and a human player's draw action ends the game immediately,
+without opponent acceptance. Ordinary offers require two human players, while **Resign** is
+available only when the side to move is human-controlled. During full-game analysis,
+**New Game…** remains available and cancels the running analysis before opening game setup.
 
 ## Stockfish
 

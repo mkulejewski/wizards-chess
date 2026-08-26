@@ -39,6 +39,8 @@ class ChessGame:
         self._move_comments: dict[int, str] = {}
         self._manual_status: GameStatus | None = None
         self._manual_winner: PlayerColor | None = None
+        self._pending_draw_offer: PlayerColor | None = None
+        self._blocked_draw_offer_position: str | None = None
         self._redo_termination: tuple[int, GameStatus, PlayerColor | None] | None = None
         if fen is not None:
             self.load_fen(fen)
@@ -71,6 +73,20 @@ class ChessGame:
     def metadata(self) -> Mapping[str, str]:
         """Return immutable portable game metadata."""
         return MappingProxyType(dict(self._metadata))
+
+    @property
+    def pending_draw_offer(self) -> PlayerColor | None:
+        """Return the player who made the unresolved draw offer, if any."""
+        return self._pending_draw_offer
+
+    @property
+    def can_propose_draw(self) -> bool:
+        """Whether an unchanged rejected position is not blocking a new offer."""
+        return (
+            not self.is_game_over()
+            and self._pending_draw_offer is None
+            and self._draw_offer_position_key() != self._blocked_draw_offer_position
+        )
 
     def update_metadata(self, **values: str) -> None:
         """Update recognized PGN headers without inventing unknown values."""
@@ -105,6 +121,8 @@ class ChessGame:
             ply: value for ply, value in self._move_comments.items() if ply <= current_ply
         }
         self._board.push(python_move)
+        self._pending_draw_offer = None
+        self._blocked_draw_offer_position = None
         self._redo_stack.clear()
         self._redo_termination = None
         return event
@@ -133,6 +151,7 @@ class ChessGame:
         move = self._board.pop()
         self._redo_stack.append(move)
         self._clear_manual_termination()
+        self._blocked_draw_offer_position = None
         return ChessMove.from_python_chess(move)
 
     def redo(self) -> MoveExecuted:
@@ -145,6 +164,8 @@ class ChessGame:
             raise InvalidMoveError(f"Undone move is no longer legal: {move.uci()}")
         event = self._event_for(move)
         self._board.push(move)
+        self._pending_draw_offer = None
+        self._blocked_draw_offer_position = None
         if self._redo_termination is not None and self._redo_termination[0] == len(
             self._board.move_stack
         ):
@@ -168,6 +189,7 @@ class ChessGame:
         self._redo_stack.clear()
         self._move_annotations.clear()
         self._move_comments.clear()
+        self._blocked_draw_offer_position = None
         self._redo_termination = None
         self._clear_manual_termination()
 
@@ -272,6 +294,7 @@ class ChessGame:
         self._metadata = self._clean_metadata(parsed.headers)
         self._move_annotations.clear()
         self._move_comments.clear()
+        self._blocked_draw_offer_position = None
         for ply, node in enumerate(parsed.mainline(), start=1):
             annotation, remaining_comment = _parse_move_annotation(node.comment)
             if annotation is not None:
@@ -315,6 +338,7 @@ class ChessGame:
         else:
             raise GameTerminationError("No draw can be claimed in the current position")
         self._manual_winner = None
+        self._pending_draw_offer = None
         self._redo_stack.clear()
         self._redo_termination = None
         return self.result()
@@ -329,6 +353,7 @@ class ChessGame:
         self._manual_winner = (
             None if self._board.has_insufficient_material(opponent_chess_color) else opponent
         )
+        self._pending_draw_offer = None
         self._redo_stack.clear()
         self._redo_termination = None
         return self.result()
@@ -342,6 +367,7 @@ class ChessGame:
         self._manual_winner = (
             PlayerColor.BLACK if resigned is PlayerColor.WHITE else PlayerColor.WHITE
         )
+        self._pending_draw_offer = None
         self._redo_stack.clear()
         self._redo_termination = None
         return self.result()
@@ -352,13 +378,46 @@ class ChessGame:
             raise GameTerminationError("The game is already over")
         self._manual_status = GameStatus.AGREED_DRAW
         self._manual_winner = None
+        self._pending_draw_offer = None
         self._redo_stack.clear()
         self._redo_termination = None
         return self.result()
 
+    def propose_draw(self, color: PlayerColor | None = None) -> PlayerColor:
+        """Record one player's non-terminal draw offer."""
+        if self.is_game_over():
+            raise GameTerminationError("The game is already over")
+        if self._pending_draw_offer is not None:
+            raise GameTerminationError("A draw offer is already pending")
+        position_key = self._draw_offer_position_key()
+        if position_key == self._blocked_draw_offer_position:
+            raise GameTerminationError("A draw was already offered in this position")
+        self._pending_draw_offer = color or self.turn
+        return self._pending_draw_offer
+
+    def accept_draw(self) -> GameResult:
+        """Accept the pending offer and end the game by agreement."""
+        if self._pending_draw_offer is None:
+            raise GameTerminationError("There is no draw offer to accept")
+        return self.agree_draw()
+
+    def reject_draw(self) -> PlayerColor:
+        """Reject and clear the pending draw offer without ending the game."""
+        if self._pending_draw_offer is None:
+            raise GameTerminationError("There is no draw offer to reject")
+        proposer = self._pending_draw_offer
+        self._pending_draw_offer = None
+        self._blocked_draw_offer_position = self._draw_offer_position_key()
+        return proposer
+
     def _clear_manual_termination(self) -> None:
         self._manual_status = None
         self._manual_winner = None
+        self._pending_draw_offer = None
+
+    def _draw_offer_position_key(self) -> str:
+        """Identify a chess position independently of move counters."""
+        return " ".join(self._board.fen(en_passant="fen").split()[:4])
 
     @classmethod
     def _clean_metadata(cls, values: Mapping[str, str]) -> dict[str, str]:

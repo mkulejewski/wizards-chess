@@ -65,6 +65,46 @@ _MESSAGES: Mapping[str, Mapping[VoiceLanguage, str]] = {
         VoiceLanguage.ENGLISH: "Game drawn by agreement.",
         VoiceLanguage.POLISH: "Remis za porozumieniem.",
     },
+    "session.draw_claimed_fifty": {
+        VoiceLanguage.ENGLISH: "Draw claimed by the fifty-move rule.",
+        VoiceLanguage.POLISH: "Remis na podstawie reguły pięćdziesięciu posunięć.",
+    },
+    "session.draw_claimed_threefold": {
+        VoiceLanguage.ENGLISH: "Draw claimed by threefold repetition.",
+        VoiceLanguage.POLISH: "Remis przez trzykrotne powtórzenie pozycji.",
+    },
+    "session.draw_offered": {
+        VoiceLanguage.ENGLISH: "{player} offers a draw. Press Draw again to accept.",
+        VoiceLanguage.POLISH: "{player} proponuje remis. Naciśnij Remis ponownie, aby przyjąć.",
+    },
+    "session.draw_rejected": {
+        VoiceLanguage.ENGLISH: "Draw offer rejected.",
+        VoiceLanguage.POLISH: "Propozycja remisu odrzucona.",
+    },
+    "session.no_draw_offer": {
+        VoiceLanguage.ENGLISH: "There is no draw offer to accept or reject.",
+        VoiceLanguage.POLISH: "Nie ma propozycji remisu do przyjęcia ani odrzucenia.",
+    },
+    "session.draw_offer_pending": {
+        VoiceLanguage.ENGLISH: "A draw offer is already pending.",
+        VoiceLanguage.POLISH: "Propozycja remisu już oczekuje na odpowiedź.",
+    },
+    "session.draw_already_offered_here": {
+        VoiceLanguage.ENGLISH: "A draw was already offered in this position.",
+        VoiceLanguage.POLISH: "W tej pozycji już zaproponowano remis.",
+    },
+    "session.draw_humans_only": {
+        VoiceLanguage.ENGLISH: "Draw offers are available only in games with two human players.",
+        VoiceLanguage.POLISH: "Propozycje remisu są dostępne tylko w grze dwóch ludzi.",
+    },
+    "session.draw_claim_human_only": {
+        VoiceLanguage.ENGLISH: "Only the human player whose turn it is may claim a draw.",
+        VoiceLanguage.POLISH: "Remisu może zażądać tylko gracz-człowiek, na którego przypada ruch.",
+    },
+    "session.resign_human_only": {
+        VoiceLanguage.ENGLISH: "Only a human player whose turn it is may resign.",
+        VoiceLanguage.POLISH: "Poddać się może tylko gracz-człowiek, na którego przypada ruch.",
+    },
     "session.saved": {
         VoiceLanguage.ENGLISH: "Saved: {path}",
         VoiceLanguage.POLISH: "Zapisano: {path}",

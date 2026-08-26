@@ -12,6 +12,10 @@ def test_status_formats_turn_check_checkmate_and_stalemate() -> None:
     session = GameSession()
     assert format_game_status(session.snapshot()) == "White to move"
 
+    session.play_text("draw")
+    assert format_game_status(session.snapshot()) == "White to move — Draw offered by White"
+    session.play_text("reject draw")
+
     session.load_fen("4k3/8/8/8/8/8/4R3/4K3 b - - 0 1")
     assert format_game_status(session.snapshot()) == "Black to move — Check"
 

@@ -51,6 +51,45 @@ def test_resignation_and_agreed_draw_are_domain_game_results() -> None:
     assert drawn.result().notation == "1/2-1/2"
 
 
+def test_draw_offer_requires_acceptance_and_a_move_rejects_it() -> None:
+    game = ChessGame()
+
+    assert game.propose_draw() is PlayerColor.WHITE
+    assert game.pending_draw_offer is PlayerColor.WHITE
+    assert not game.result().is_over
+
+    game.make_move(ChessMove.from_uci("e2e4"))
+    assert game.pending_draw_offer is None
+    assert not game.result().is_over
+
+    assert game.propose_draw() is PlayerColor.BLACK
+    assert game.accept_draw().status is GameStatus.AGREED_DRAW
+    assert game.pending_draw_offer is None
+
+
+def test_draw_offer_can_be_explicitly_rejected() -> None:
+    game = ChessGame()
+    game.propose_draw()
+
+    assert game.reject_draw() is PlayerColor.WHITE
+    assert game.pending_draw_offer is None
+    assert not game.result().is_over
+
+    with pytest.raises(GameTerminationError, match="no draw offer"):
+        game.accept_draw()
+    with pytest.raises(GameTerminationError, match="already offered"):
+        game.propose_draw()
+
+    game.make_move(ChessMove.from_uci("e2e4"))
+    assert game.can_propose_draw
+    game.propose_draw()
+    game.reject_draw()
+
+    game.undo()
+    assert game.can_propose_draw
+    assert game.propose_draw() is PlayerColor.WHITE
+
+
 def test_game_store_uses_unique_saves_and_recovery_slot(tmp_path: Path) -> None:
     store = GameStore(tmp_path)
 
