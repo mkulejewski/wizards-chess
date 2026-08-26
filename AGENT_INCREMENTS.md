@@ -40,6 +40,17 @@ Status meanings:
 | Post-game analysis presentation | Complete | Completed move-by-move text reports remain visible through terminal-position refreshes and history navigation while cached/live evaluations continue updating the sidebar and the completed-analysis graph remains available. |
 | Bundled Stockfish distribution | Complete for Linux x86-64 | Official, unmodified Stockfish 18 baseline binary stored as a checksummed XZ asset; atomic first-use extraction to the XDG cache; explicit executable override, platform bundle, and system `PATH` precedence; corrupt/unsupported-bundle fallback; GPLv3, authorship, exact source archive, build target, and hashes documented. Other OS/CPU targets use the existing custom path or `PATH` until a matching release bundle is added. |
 
+## Stage 3 hardware foundation
+
+| Increment | Status | Delivered evidence |
+| --- | --- | --- |
+| Stage 3.1 — first hardware abstraction layer | Complete; physical acceptance deferred | Hardware-neutral immutable operation/result models; idealized board geometry; stable physical piece identity with known/unknown locations; immutable `PhysicalBoardState`; separate controller and synchronization state machines; pure simple-move planner with explicit capture/castling/en-passant/promotion rejection; narrow `HardwarePort`; deterministic `FakeHardware` lifecycle, trace, failure/timeout injection, stop, and E-stop; transaction-like `HardwareCoordinator`; placement-only reconciliation; canonical `MoveExecuted` integration; conservative Undo/New Game/FEN/PGN replacement notifications; adapter failure isolation and explicit shutdown. No serial, GPIO, motor, sensor, or physical device is claimed. |
+
+Stage 3.1 added `hardware/models.py`, `errors.py`, `board_state.py`, `port.py`, `geometry.py`,
+`planner.py`, `fake.py`, and `coordinator.py`; expanded the package exports and compatibility
+simulator; integrated optional move, replacement, and close notifications in `GameSession`;
+added four focused hardware test modules; and updated the README architecture and limitations.
+
 ## Verification record
 
 The final verification commands for this increment are:
@@ -66,6 +77,15 @@ Final clean run on 2026-08-25:
   subprocess sandbox. Real streaming acceptance remains pending; deterministic streaming and
   cancellation adapters passed automatically.
 
+Stage 3.1 clean run on 2026-08-26:
+
+- `uv run pytest` — **360 passed**.
+- `uv run ruff check .` — **passed**.
+- `uv run ruff format --check .` — **107 files already formatted**.
+- `uv run pyright` — **0 errors, 0 warnings**.
+- No physical hardware acceptance was attempted; all controller behavior used deterministic
+  in-memory fakes.
+
 Manual acceptance still required on a machine with the relevant optional systems:
 
 1. Start the GUI with a real configured Stockfish binary.
@@ -81,5 +101,5 @@ Manual acceptance still required on a machine with the relevant optional systems
 
 | Stage | Status | Boundary |
 | --- | --- | --- |
-| Stage 3 — physical-board integration | Deferred | Serial/GPIO, motor drivers, XY carriage, electromagnet, sensors, captures, calibration, and physical path planning are explicitly not part of Stage 2.x. They must consume the canonical application move-event seam. |
+| Stage 3.2 — physical-board implementation | Deferred | Serial transport and firmware, GPIO/motor drivers, real homing/calibration, XY carriage and electromagnet control, sensing/observed state, captures and special-move sequences, obstacle-aware paths, reconciliation, recovery movement, and hardware GUI controls remain outside Stage 3.1. They must implement or compose beneath the new hardware port/coordinator seam. |
 | Online/cloud/multiplayer services | Deferred | Core gameplay remains local and has no account or network dependency. |

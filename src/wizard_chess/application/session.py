@@ -27,7 +27,11 @@ from wizard_chess.domain.results import GameResult, PlayerColor
 from wizard_chess.engine.base import ChessEngine
 from wizard_chess.engine.factory import create_stockfish_engine
 from wizard_chess.engine.models import EngineClockState, EngineDecision
-from wizard_chess.hardware.base import PhysicalBoard
+from wizard_chess.hardware.base import (
+    ClosablePhysicalBoard,
+    PhysicalBoard,
+    PhysicalBoardPositionObserver,
+)
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.localization import translate
 from wizard_chess.persistence.game_store import GameStore
@@ -237,7 +241,7 @@ class GameSession:
         self._adjudicate_timeout()
         mover = self._game.turn
         event = self._game.make_move(move)
-        self._physical_board.execute_move(event)
+        self._emit_physical_move(event)
         timing = self._clock.switch(self._game.turn)
         evaluation = engine_decision.evaluation if engine_decision is not None else None
         annotation = MoveAnnotation(
@@ -284,6 +288,7 @@ class GameSession:
     def undo(self) -> ChessMove:
         """Undo through the authoritative domain history."""
         move = self._game.undo()
+        self._notify_physical_position_replaced()
         self._clock.set_active(self._game.turn)
         self._revision += 1
         self._autosave()
@@ -292,7 +297,7 @@ class GameSession:
     def redo(self) -> MoveExecuted:
         """Redo and emit the same event as any accepted move."""
         event = self._game.redo()
-        self._physical_board.execute_move(event)
+        self._emit_physical_move(event)
         self._clock.set_active(self._game.turn)
         self._revision += 1
         self._autosave()
@@ -304,6 +309,7 @@ class GameSession:
             self._configure_new_game(settings)
             return
         self._game = self._new_configured_game()
+        self._notify_physical_position_replaced()
         self._clock.reset(self._game.turn)
         self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
@@ -324,6 +330,7 @@ class GameSession:
         self._engine = replacement_engine
         self._clock = replacement_clock
         self._game = replacement_game
+        self._notify_physical_position_replaced()
         self._analysis_mode = configured.engine.analysis_mode
         self.live_analysis.reset(configured.engine.live_analysis_max_depth)
         self._last_feedback = None
@@ -336,6 +343,7 @@ class GameSession:
     def load_fen(self, fen: str) -> None:
         """Load a validated position and clear its unavailable history."""
         self._game.load_fen(fen)
+        self._notify_physical_position_replaced()
         self._clock.reset(self._game.turn)
         self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
@@ -346,6 +354,7 @@ class GameSession:
         replacement = ChessGame()
         replacement.load_pgn(pgn)
         self._game = replacement
+        self._notify_physical_position_replaced()
         self._clock.reset(self._game.turn)
         self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
@@ -460,6 +469,27 @@ class GameSession:
         if self._engine is not None:
             self._engine.close()
         self.live_analysis.reset()
+        if isinstance(self._physical_board, ClosablePhysicalBoard):
+            try:
+                self._physical_board.close()
+            except Exception:
+                LOGGER.exception("Physical-board shutdown failed")
+
+    def _emit_physical_move(self, event: MoveExecuted) -> None:
+        """Keep optional output-adapter failures outside the chess transaction."""
+        try:
+            self._physical_board.execute_move(event)
+        except Exception:
+            LOGGER.exception("Physical-board execution failed after digital move %s", event.uci)
+
+    def _notify_physical_position_replaced(self) -> None:
+        """Tell capable adapters that digital state changed without physical motion."""
+        if not isinstance(self._physical_board, PhysicalBoardPositionObserver):
+            return
+        try:
+            self._physical_board.position_replaced()
+        except Exception:
+            LOGGER.exception("Physical-board replacement notification failed")
 
     def _execute_command(self, intent: CommandIntent) -> SessionResult:
         command = intent.command

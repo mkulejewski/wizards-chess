@@ -30,7 +30,16 @@ CLI / GUI / English voice / Polish voice / script / engine reply
              MoveExecuted event
                   │
                   ▼
-        future Stage 3 physical-board seam
+              HardwareCoordinator
+             ┌────────┴────────┐
+             ▼                 ▼
+    PhysicalBoardState  PhysicalMovePlanner
+                                │
+                                ▼
+                          HardwarePort
+                                │
+                                ▼
+                         FakeHardware
 ```
 
 - `domain` owns authoritative chess state, metadata, termination states, and move events.
@@ -46,7 +55,41 @@ CLI / GUI / English voice / Polish voice / script / engine reply
 - `gui` renders only authoritative snapshots and runs voice, live analysis, engine replies,
   and post-game analysis outside the Qt event thread.
 - `persistence` owns PGN, recovery, settings, and analysis filesystem access.
-- `hardware` remains a replaceable event consumer; no Stage 3 control is implemented here.
+- `hardware` consumes canonical move events through a replaceable coordinator; it never
+  authorizes moves or mutates `ChessGame`.
+
+## Stage 3.1 hardware foundation
+
+Stage 3.1 models physical-board control without connecting to real hardware. Four state domains
+remain deliberately separate:
+
+- `ChessGame` / `GameSession` own the authoritative logical chess position, legality, notation,
+  history, and results.
+- `PhysicalBoardState` is an immutable belief about physical piece identities and locations.
+- `HardwareControllerState` tracks the controller lifecycle from disconnected through homing,
+  ready, executing, fault, and emergency stop.
+- `PhysicalSynchronization` describes whether believed physical placement is synchronized,
+  executing, desynchronized, or unknown relative to the digital position.
+
+When hardware participation starts, physical placement is explicitly seeded from an
+authoritative position. With no sensors in this stage, that seed is an assumption rather than
+an observation. A canonical `MoveExecuted` event is converted to a hardware-neutral request;
+`PhysicalMovePlanner` currently plans only ordinary non-capturing moves as `MoveTo`,
+`SetMagnet(True)`, `MoveTo`, and `SetMagnet(False)`. `FakeHardware` executes and records this
+typed sequence deterministically behind `HardwarePort`.
+
+Physical placement changes only after every operation completes. A partial failure leaves the
+already-legal digital move intact, faults or stops the controller as appropriate, marks the
+moving piece's physical location unknown, and never generates a chess undo. Captures, castling,
+en passant, and promotion are recognized but explicitly desynchronize the physical layer
+because their movement sequences are deferred. New Game, FEN/PGN replacement, and Undo also
+mark existing physical assumptions desynchronized; explicit initialization is required before
+physical execution resumes.
+
+There is no serial transport, Arduino firmware, GPIO, motor control, real homing, calibration,
+obstacle avoidance, or board sensing yet. The Stage 3.1 fake, operation trace, failure injection,
+reconciliation comparison, and lifecycle APIs are intended for deterministic testing and for a
+future worker-backed adapter that does not block the Qt thread.
 
 ## Setup and launch
 
@@ -378,7 +421,8 @@ uv run pyright
 - Confirmation policy is modeled and testable, but the current GUI executes uniquely resolved
   voice moves directly; ambiguous commands are rejected for clarification.
 - There is no wake word, speech synthesis, speaker identification, online play, cloud account,
-  physical motion, GPIO, motor, sensor, RFID, or path-planning implementation.
+  real physical motion, serial/GPIO adapter, motor, sensor, RFID, calibration, capture handling,
+  obstacle avoidance, or general path-planning implementation.
 
-Those physical concerns belong to Stage 3 and must attach to canonical `MoveExecuted` events
-rather than mutate the authoritative chess state through a new path.
+Those physical concerns belong to later Stage 3 increments and must remain beneath canonical
+`MoveExecuted` events rather than mutate the authoritative chess state through a new path.
