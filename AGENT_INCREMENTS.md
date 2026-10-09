@@ -170,6 +170,19 @@ Manual acceptance still required on a machine with the relevant optional systems
    as White with `strong_club` strength and 2.5 seconds, remember/reuse the setup, relaunch
    with only `uv run wizard-chess`, then repeat with Stockfish as Black.
 
+### Local-only Stockfish executable — 2026-10-09
+
+- Removed `src/wizard_chess/engine/bundled/stockfish-18/linux-x86_64/stockfish.xz`
+  from Git tracking while preserving the local file.
+- Added explicit `.gitignore` rules for compressed and extracted platform executables;
+  retained the manifest, checksums, and licensing documents in Git.
+- Updated `README.md` and `THIRD_PARTY_NOTICES.md` to describe local-only engine assets
+  and Stockfish installation/selection for fresh checkouts.
+- Existing commits still contain the previously tracked archive; no history rewrite was performed.
+- Validation: **410 tests passed**, Ruff lint/format passed, and pyright reported **0 errors,
+  0 warnings** using the existing environment and module-based pytest/pyright launchers.
+- Confirmed the retained local archive matches its manifest checksum and is ignored by Git.
+
 ## Deferred stages
 
 | Stage | Status | Boundary |

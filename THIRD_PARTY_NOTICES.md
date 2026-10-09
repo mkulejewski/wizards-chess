@@ -16,8 +16,10 @@ share-alike conditions. Wizard Chess is not affiliated with or endorsed by Liche
 
 ## Stockfish 18
 
-Wizard Chess distributes an unmodified official **Stockfish 18** Linux x86-64 baseline
-executable. It is stored with XZ compression and extracted to the user's cache on first use.
+Wizard Chess supports a local copy of the unmodified official **Stockfish 18** Linux x86-64
+baseline executable. The executable and its XZ archive are excluded from Git; the manifest,
+checksums, and licensing documents remain tracked. When present, the XZ archive is extracted
+to the user's cache on first use.
 
 - Upstream project: <https://github.com/official-stockfish/Stockfish>
 - Release: <https://github.com/official-stockfish/Stockfish/releases/tag/sf_18>

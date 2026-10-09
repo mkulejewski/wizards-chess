@@ -184,7 +184,9 @@ available only when the side to move is human-controlled. During full-game analy
 
 ## Stockfish
 
-Wizard Chess bundles the official Stockfish 18 baseline build for Linux x86-64. The compressed
+The Stockfish executable is local-only and excluded from Git. Fresh checkouts need Stockfish
+installed on `PATH` or selected in **Preferences…**. The retained manifest supports a local
+copy of the official Stockfish 18 baseline build for Linux x86-64. When present, the compressed
 asset is verified and extracted on first use to
 `$XDG_CACHE_HOME/wizard-chess/engines` or `~/.cache/wizard-chess/engines`; it is not added to or
 allowed to mutate the process-wide `PATH`. Platforms for which a bundle is not present retain
@@ -221,8 +223,9 @@ explicit environment or saved Preferences path
 ```
 
 An explicit selection is never silently replaced by the bundle when it later becomes invalid.
-The current bundle is the unmodified official Stockfish 18 Linux x86-64 baseline executable,
-recompressed with XZ for repository distribution. Its exact executable/archive checksums,
+The supported local bundle is the unmodified official Stockfish 18 Linux x86-64 baseline
+executable, recompressed with XZ. The executable and compressed archive are ignored by Git;
+the manifest and licensing documents remain tracked. Its exact executable/archive checksums,
 GPLv3 license, authors, and reproducible source pointer live under
 `src/wizard_chess/engine/bundled/stockfish-18/` and in `THIRD_PARTY_NOTICES.md`.
 

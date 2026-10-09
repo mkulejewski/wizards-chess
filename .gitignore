@@ -27,3 +27,7 @@ build/
 models/
 recordings/
 
+# Local Stockfish executables (retain manifests and licensing in Git)
+/src/wizard_chess/engine/bundled/stockfish-18/*/stockfish.xz
+/src/wizard_chess/engine/bundled/stockfish-18/*/stockfish
+/src/wizard_chess/engine/bundled/stockfish-18/*/stockfish.exe
