@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from wizard_chess.application.session import GameSession, SessionResult
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,21 +29,29 @@ class ScriptedGameRunner:
         self.session = session or GameSession()
 
     def run(self, commands: Iterable[str]) -> ScriptedGameResult:
+        LOGGER.info("Scripted game started")
         accepted: list[str] = []
         results: list[SessionResult] = []
         for raw in commands:
             command = raw.strip()
             if not command or command.startswith("#"):
                 continue
+            LOGGER.debug("Script command %d: %r", len(accepted) + 1, command)
             accepted.append(command)
             results.append(self.session.play_text(command))
         snapshot = self.session.snapshot()
-        return ScriptedGameResult(
+        result = ScriptedGameResult(
             commands=tuple(accepted),
             results=tuple(results),
             final_fen=snapshot.fen,
             move_history=snapshot.move_history,
         )
+        LOGGER.info(
+            "Scripted game completed: commands=%d plies=%d", len(accepted), len(result.move_history)
+        )
+        return result
 
     def run_file(self, source: str | Path) -> ScriptedGameResult:
-        return self.run(Path(source).read_text(encoding="utf-8").splitlines())
+        path = Path(source)
+        LOGGER.info("Loading UTF-8 command script: %s", path)
+        return self.run(path.read_text(encoding="utf-8").splitlines())

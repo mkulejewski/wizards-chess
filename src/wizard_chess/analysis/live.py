@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from time import monotonic
 
@@ -9,6 +10,8 @@ import chess
 
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.engine.models import EngineEvaluation, PositionAnalysis
+
+LOGGER = logging.getLogger(__name__)
 
 
 def position_key(fen: str) -> str:
@@ -124,6 +127,13 @@ class LiveAnalysisController:
             cached=self.cache.get_best(key),
         )
         self._selection = selected
+        LOGGER.debug(
+            "Live analysis position selected: generation=%d ply=%d cached=%s FEN=%s",
+            selected.generation,
+            ply,
+            selected.cached is not None,
+            fen,
+        )
         return selected
 
     def make_result(
@@ -159,8 +169,22 @@ class LiveAnalysisController:
             or result.position_id != selected.position_id
             or result.ply != selected.ply
         ):
+            LOGGER.debug(
+                "Rejected stale live analysis result: generation=%d position=%s ply=%d",
+                generation,
+                result.position_id,
+                result.ply,
+            )
             return False
-        return self.cache.store(result)
+        accepted = self.cache.store(result)
+        if accepted:
+            LOGGER.debug(
+                "Accepted live analysis result: generation=%d depth=%d evaluation=%s",
+                generation,
+                result.depth,
+                result.evaluation.display(),
+            )
+        return accepted
 
     def store_terminal(self, selection: AnalysisSelection, board: chess.Board) -> bool:
         """Cache a canonical final evaluation without asking an engine to search."""
@@ -203,6 +227,7 @@ class LiveAnalysisController:
         """Reject all pending updates while retaining the per-game cache."""
         self._generation += 1
         self._selection = None
+        LOGGER.debug("Live analysis selection invalidated: generation=%d", self._generation)
 
     def reset(self, max_depth: int | None = None) -> None:
         """Discard all state when the owning game is replaced or closed."""

@@ -9,8 +9,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
+import wizard_chess.gui.main_window as main_window_module
 from wizard_chess.analysis.live import LiveAnalysisResult, position_key
-from wizard_chess.application.session import GameSession
+from wizard_chess.application.session import GameSession, SessionResult
 from wizard_chess.configuration import (
     AppearanceSettings,
     ApplicationSettings,
@@ -20,6 +21,7 @@ from wizard_chess.configuration import (
     PieceSet,
     PlayerKind,
     PlayerSettings,
+    VoiceLanguage,
 )
 from wizard_chess.domain.exceptions import AnalysisCancelledError
 from wizard_chess.domain.move import ChessMove
@@ -37,6 +39,7 @@ from wizard_chess.gui.main_window import MainWindow
 from wizard_chess.hardware.simulated_board import SimulatedPhysicalBoard
 from wizard_chess.persistence.settings_store import SettingsStore
 from wizard_chess.speech.base import CancellationCheck
+from wizard_chess.speech.config import VoiceConfig
 from wizard_chess.speech.controller import VoiceController
 from wizard_chess.speech.mock import MockAudioInput, MockSpeechRecognizer
 from wizard_chess.speech.models import AudioRecording, Transcript
@@ -202,6 +205,47 @@ def test_gui_renders_initial_authoritative_position(qt_application: QApplication
     assert window.board_widget.piece_at("e8") == "k"
     assert window.board_widget.piece_at("a8") == "r"
     assert window.status_label.text() == "White to move"
+
+    window.close()
+
+
+def test_gui_owned_recognizer_tracks_the_selected_voice_language(
+    qt_application: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    del qt_application
+    monkeypatch.delenv("WIZARD_CHESS_VOICE_LANGUAGE", raising=False)
+    monkeypatch.delenv("WIZARD_CHESS_VOICE_MODEL", raising=False)
+    configs: list[VoiceConfig] = []
+
+    def create_controller(
+        submit_command: Callable[[str], SessionResult],
+        config: VoiceConfig | None = None,
+    ) -> VoiceController[SessionResult]:
+        assert config is not None
+        configs.append(config)
+        return VoiceController(MockAudioInput(), MockSpeechRecognizer(), submit_command)
+
+    monkeypatch.setattr(
+        main_window_module,
+        "create_default_voice_controller",
+        create_controller,
+    )
+    session = GameSession(settings=ApplicationSettings(voice_language=VoiceLanguage.POLISH))
+    window = MainWindow(session)
+
+    assert (configs[-1].language, configs[-1].model) == (VoiceLanguage.POLISH, "base")
+
+    window.language_combo.setCurrentIndex(
+        window.language_combo.findData(VoiceLanguage.ENGLISH.value)
+    )
+    assert (configs[-1].language, configs[-1].model) == (VoiceLanguage.ENGLISH, "base.en")
+
+    window.language_combo.setCurrentIndex(
+        window.language_combo.findData(VoiceLanguage.POLISH.value)
+    )
+    assert (configs[-1].language, configs[-1].model) == (VoiceLanguage.POLISH, "base")
+    assert session.voice_language is VoiceLanguage.POLISH
 
     window.close()
 

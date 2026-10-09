@@ -5,7 +5,9 @@ import pytest
 
 import wizard_chess.speech.audio as audio_module
 import wizard_chess.speech.faster_whisper as faster_whisper_module
+from wizard_chess.configuration import VoiceLanguage
 from wizard_chess.speech.audio import SoundDeviceAudioInput
+from wizard_chess.speech.config import VoiceConfig
 from wizard_chess.speech.exceptions import VoiceDependencyError
 from wizard_chess.speech.factory import create_default_voice_controller
 from wizard_chess.speech.faster_whisper import FasterWhisperRecognizer
@@ -44,6 +46,40 @@ class FakeNumpyModule:
     def asarray(self, samples: object, *, dtype: object) -> object:
         del dtype
         return samples
+
+
+@pytest.mark.parametrize(
+    ("language", "expected_model"),
+    [
+        (VoiceLanguage.ENGLISH, "base.en"),
+        (VoiceLanguage.POLISH, "base"),
+        (VoiceLanguage.AUTO, "base"),
+    ],
+)
+def test_voice_config_uses_a_model_compatible_with_the_effective_language(
+    monkeypatch: pytest.MonkeyPatch,
+    language: VoiceLanguage,
+    expected_model: str,
+) -> None:
+    monkeypatch.delenv("WIZARD_CHESS_VOICE_LANGUAGE", raising=False)
+    monkeypatch.delenv("WIZARD_CHESS_VOICE_MODEL", raising=False)
+
+    config = VoiceConfig.from_environment(language=language)
+
+    assert config.language is language
+    assert config.model == expected_model
+
+
+def test_voice_config_keeps_an_explicit_model_for_a_selected_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WIZARD_CHESS_VOICE_LANGUAGE", VoiceLanguage.ENGLISH.value)
+    monkeypatch.setenv("WIZARD_CHESS_VOICE_MODEL", "large-v3")
+
+    config = VoiceConfig.from_environment(language=VoiceLanguage.POLISH)
+
+    assert config.language is VoiceLanguage.POLISH
+    assert config.model == "large-v3"
 
 
 def test_faster_whisper_model_loads_lazily_and_is_reused(

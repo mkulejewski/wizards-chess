@@ -110,7 +110,8 @@ class MainWindow(QMainWindow):
         self._game_setup_dialog: GameSetupDialog | None = None
         self._engine_preferences_dialog: EnginePreferencesDialog | None = None
         self.voice_controller = voice_controller or create_default_voice_controller(
-            self.session.play_text
+            self.session.play_text,
+            VoiceConfig.from_environment(language=self.session.voice_language),
         )
         self._voice_worker: VoiceWorker | None = None
         self._engine_worker: EngineWorker | None = None
@@ -841,7 +842,7 @@ class MainWindow(QMainWindow):
         self.session.set_voice_language(language)
         self._save_preferences(replace(self._persistent_settings, voice_language=language))
         if self._owns_voice_controller:
-            config = replace(VoiceConfig.from_environment(), language=language)
+            config = VoiceConfig.from_environment(language=language)
             self.voice_controller = create_default_voice_controller(
                 self.session.play_text,
                 config,

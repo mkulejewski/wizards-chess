@@ -68,6 +68,7 @@ class StockfishEngine:
     def start(self) -> None:
         """Start and configure the process once."""
         if self._engine is not None:
+            LOGGER.debug("Stockfish start skipped: process already running")
             return
         if not self.settings.enabled:
             raise EngineUnavailableError("Chess engine features are disabled")
@@ -76,6 +77,15 @@ class StockfishEngine:
                 "Stockfish is not configured; choose an executable in Engine Preferences"
             )
         engine: chess.engine.SimpleEngine | None = None
+        LOGGER.info("Starting Stockfish: path=%s", self.settings.path)
+        LOGGER.debug(
+            "Stockfish configuration: strength=%s threads=%d hash=%dMB depth=%s syzygy=%s",
+            self.settings.strength.value,
+            self.settings.threads,
+            self.settings.hash_mb,
+            self.settings.analysis_depth,
+            self.settings.syzygy_path or "disabled",
+        )
         try:
             engine = chess.engine.SimpleEngine.popen_uci(self.settings.path)
             available = engine.options
@@ -97,12 +107,12 @@ class StockfishEngine:
                     engine.quit()
                 except (chess.engine.EngineError, OSError):
                     LOGGER.debug("Temporary engine cleanup failed", exc_info=True)
-            LOGGER.warning("Stockfish startup failed: %s", error)
+            LOGGER.error("Stockfish startup failed: %s", error, exc_info=True)
             raise EngineUnavailableError(
                 f"Stockfish could not be started from {self.settings.path!r}"
             ) from error
         self._engine = engine
-        LOGGER.info("Chess engine started")
+        LOGGER.info("Stockfish started: name=%s", self._engine_name)
 
     def analyse_position(
         self,
@@ -119,6 +129,7 @@ class StockfishEngine:
         position = board.copy(stack=True)
         fen = position.fen()
         if position.is_game_over(claim_draw=False):
+            LOGGER.debug("Engine analysis skipped for terminal position: FEN=%s", fen)
             return PositionAnalysis(fen=fen, terminal=True)
         self.start()
         engine = self._require_engine()
@@ -127,16 +138,33 @@ class StockfishEngine:
             time=(time_ms or self.settings.post_game_analysis_time_ms) / 1000,
             depth=self.settings.analysis_depth,
         )
+        LOGGER.debug(
+            "Engine analysis started: FEN=%s multipv=%d time_ms=%d depth=%s",
+            fen,
+            requested,
+            time_ms or self.settings.post_game_analysis_time_ms,
+            self.settings.analysis_depth,
+        )
         try:
             raw = engine.analyse(position, limit, multipv=requested)
         except (chess.engine.EngineTerminatedError, BrokenPipeError) as error:
             self._engine = None
+            LOGGER.error("Stockfish stopped during position analysis", exc_info=True)
             raise EngineCrashedError("The chess engine stopped unexpectedly") from error
         except chess.engine.EngineError as error:
+            LOGGER.error("Stockfish position analysis failed", exc_info=True)
             raise EngineCrashedError("The chess engine could not analyse this position") from error
         if cancellation():
             raise AnalysisCancelledError("Engine analysis was cancelled")
         lines = tuple(self._normalize_info(position, info) for info in raw)
+        best = lines[0] if lines else None
+        LOGGER.debug(
+            "Engine analysis completed: lines=%d best=%s depth=%s evaluation=%s",
+            len(lines),
+            best.move.uci() if best is not None else "none",
+            best.depth if best is not None else None,
+            best.evaluation.display() if best is not None else "unavailable",
+        )
         return PositionAnalysis(fen=fen, lines=lines)
 
     def get_best_move(self, board: chess.Board) -> ChessMove | None:
@@ -168,6 +196,7 @@ class StockfishEngine:
         engine = self._require_engine()
         deepest = -1
         useful_update_seen = False
+        LOGGER.debug("Live engine analysis started: max_depth=%d FEN=%s", max_depth, fen)
         try:
             with engine.analysis(
                 position,
@@ -188,21 +217,30 @@ class StockfishEngine:
                     on_update(PositionAnalysis(fen=fen, lines=(line,)))
                     useful_update_seen = True
                     deepest = depth
+                    LOGGER.debug(
+                        "Live analysis update: depth=%d evaluation=%s best=%s",
+                        depth,
+                        line.evaluation.display(),
+                        line.move.uci(),
+                    )
                     if depth >= max_depth:
                         break
         except (chess.engine.EngineTerminatedError, BrokenPipeError) as error:
             self._engine = None
             if cancellation():
                 raise AnalysisCancelledError("Live engine analysis was cancelled") from error
+            LOGGER.error("Stockfish stopped during live analysis", exc_info=True)
             raise EngineCrashedError("The chess engine stopped during live analysis") from error
         except chess.engine.EngineError as error:
             if cancellation():
                 raise AnalysisCancelledError("Live engine analysis was cancelled") from error
+            LOGGER.error("Stockfish live analysis failed", exc_info=True)
             raise EngineCrashedError("The chess engine could not stream analysis") from error
         if cancellation():
             raise AnalysisCancelledError("Live engine analysis was cancelled")
         if not useful_update_seen:
             raise EngineCrashedError("The chess engine returned no usable live analysis")
+        LOGGER.debug("Live engine analysis completed at depth=%d", deepest)
 
     def play_move(
         self,
@@ -221,24 +259,37 @@ class StockfishEngine:
         self.start()
         engine = self._require_engine()
         limit = self._player_limit(clock)
+        LOGGER.debug("Engine move search started: limit=%r FEN=%s", limit, position.fen())
         try:
             result = engine.play(position, limit, info=chess.engine.INFO_ALL)
         except (chess.engine.EngineTerminatedError, BrokenPipeError) as error:
             self._engine = None
+            LOGGER.error("Stockfish stopped during move search", exc_info=True)
             raise EngineCrashedError("The chess engine stopped unexpectedly") from error
         except chess.engine.EngineError as error:
+            LOGGER.error("Stockfish move search failed", exc_info=True)
             raise EngineCrashedError("The chess engine could not select a move") from error
         if cancellation():
             raise AnalysisCancelledError("Engine play was cancelled")
         if result.move is None:
+            LOGGER.warning("Stockfish returned no move for a non-terminal position")
             return None
-        return self._normalize_decision(result.move, result.info)
+        decision = self._normalize_decision(result.move, result.info)
+        LOGGER.debug(
+            "Engine move search completed: move=%s depth=%s nodes=%s time=%s",
+            decision.move.uci(),
+            decision.depth,
+            decision.nodes,
+            decision.search_time_seconds,
+        )
+        return decision
 
     def cancel_pending(self) -> None:
         """Force-stop current UCI work; the lazy adapter can restart on demand."""
         engine, self._engine = self._engine, None
         if engine is None:
             return
+        LOGGER.info("Cancelling pending Stockfish work")
         try:
             engine.close()
         except (chess.engine.EngineError, OSError):

@@ -7,6 +7,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
+from pathlib import Path
+
+from wizard_chess.logging_config import LoggingConfig, LogLevel
 
 LOGGER = logging.getLogger(__name__)
 
@@ -169,13 +172,31 @@ class ApplicationSettings:
     game_setup_saved: bool = False
     show_game_setup_on_startup: bool = True
     autosave: bool = False
-    logging_level: str = "INFO"
+    logging_level: LogLevel = LogLevel.INFO
+    terminal_log_enabled: bool = True
+    file_log_enabled: bool = True
+    log_file_path: str | None = None
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise ValueError("Voice confidence threshold must be between 0 and 1")
-        if self.logging_level.upper() not in logging.getLevelNamesMapping():
-            raise ValueError(f"Invalid logging level: {self.logging_level}")
+        object.__setattr__(self, "logging_level", LogLevel.parse(str(self.logging_level)))
+        if self.log_file_path is not None:
+            object.__setattr__(self, "log_file_path", self.log_file_path.strip() or None)
+
+    def logging_configuration(self, default_file_path: Path) -> LoggingConfig:
+        """Resolve portable settings into filesystem-aware logging configuration."""
+        file_path = (
+            Path(self.log_file_path).expanduser()
+            if self.log_file_path is not None
+            else default_file_path
+        )
+        return LoggingConfig(
+            level=self.logging_level,
+            terminal_enabled=self.terminal_log_enabled,
+            file_enabled=self.file_log_enabled,
+            file_path=file_path,
+        )
 
     @property
     def engine_required(self) -> bool:
@@ -274,6 +295,17 @@ class ApplicationSettings:
             legacy_time_ms
             if "WIZARD_CHESS_ENGINE_TIME_MS" in values
             else defaults.engine.post_game_analysis_time_ms
+        )
+        configured_log_file = values.get("WIZARD_CHESS_LOG_FILE")
+        log_file_path = (
+            configured_log_file.strip() or None
+            if configured_log_file is not None
+            else defaults.log_file_path
+        )
+        file_log_default = (
+            True
+            if configured_log_file is not None and log_file_path is not None
+            else defaults.file_log_enabled
         )
         settings = cls(
             voice_language=language,
@@ -394,7 +426,22 @@ class ApplicationSettings:
             game_setup_saved=defaults.game_setup_saved,
             show_game_setup_on_startup=defaults.show_game_setup_on_startup,
             autosave=_bool_environment(values, "WIZARD_CHESS_AUTOSAVE", defaults.autosave),
-            logging_level=values.get("WIZARD_CHESS_LOG_LEVEL", defaults.logging_level).upper(),
+            logging_level=_log_level_environment(
+                values,
+                "WIZARD_CHESS_LOG_LEVEL",
+                defaults.logging_level,
+            ),
+            terminal_log_enabled=_bool_environment(
+                values,
+                "WIZARD_CHESS_TERMINAL_LOG",
+                defaults.terminal_log_enabled,
+            ),
+            file_log_enabled=_bool_environment(
+                values,
+                "WIZARD_CHESS_LOG_FILE_ENABLED",
+                file_log_default,
+            ),
+            log_file_path=log_file_path,
         )
         return settings.with_required_engine()
 
@@ -526,6 +573,21 @@ def _enum_environment[EnumT: StrEnum](
         return default
     try:
         return enum_type(value.strip().lower())
+    except ValueError:
+        LOGGER.warning("Ignoring invalid %s=%r", name, value)
+        return default
+
+
+def _log_level_environment(
+    values: Mapping[str, str],
+    name: str,
+    default: LogLevel,
+) -> LogLevel:
+    value = values.get(name)
+    if value is None:
+        return default
+    try:
+        return LogLevel.parse(value)
     except ValueError:
         LOGGER.warning("Ignoring invalid %s=%r", name, value)
         return default

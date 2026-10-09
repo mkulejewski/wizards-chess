@@ -115,6 +115,37 @@ saved game configuration immediately. Use **New Game…** to change sides later,
 Keyboard, GUI, PGN/FEN, clocks, and human-vs-human play do not require a microphone or
 Stockfish.
 
+## Logging
+
+Wizard Chess logs meaningful startup, game, command, voice, engine, analysis, hardware, and
+shutdown events to the terminal at `INFO` by default. It simultaneously writes a more detailed
+UTF-8 log to `$XDG_STATE_HOME/wizard-chess/logs/wizard-chess.log`, or
+`~/.local/state/wizard-chess/logs/wizard-chess.log` when `XDG_STATE_HOME` is unset. The file
+rotates at 10 MiB and retains five backups.
+
+```bash
+uv run wizard-chess
+uv run wizard-chess --log-level DEBUG
+uv run wizard-chess --log-level WARNING
+uv run wizard-chess --log-level ERROR
+uv run wizard-chess --log-level OFF
+uv run wizard-chess --log-file ./logs/session.log
+uv run wizard-chess --no-log-file
+uv run wizard-chess --no-terminal-log --log-file ./logs/session.log
+```
+
+`DEBUG` adds parsed intents, resolved legal-move candidates, FEN/state transitions, engine search
+details, speech-pipeline state, and physical motion plans. `INFO` follows normal operation;
+`WARNING` shows recoverable problems; `ERROR` shows failed operations; and `OFF` suppresses normal
+application logging. Level names are case-insensitive. `--log-file PATH` creates missing parent
+directories and does not disable terminal output. `--no-log-file` and `--no-terminal-log` control
+the two destinations independently; `--terminal-log` can explicitly re-enable terminal output.
+
+The equivalent environment settings are `WIZARD_CHESS_LOG_LEVEL`,
+`WIZARD_CHESS_TERMINAL_LOG`, `WIZARD_CHESS_LOG_FILE_ENABLED`, and `WIZARD_CHESS_LOG_FILE`.
+Launcher options take precedence over these environment values and persisted/default settings.
+File entries include full timestamps, logger names, and exception tracebacks where applicable.
+
 ## Desktop usability
 
 The GUI provides:
@@ -345,7 +376,7 @@ The original bounded-capture settings remain available:
 
 | Variable | Default |
 | --- | --- |
-| `WIZARD_CHESS_VOICE_MODEL` | `base.en` (`base` for Polish) |
+| `WIZARD_CHESS_VOICE_MODEL` | `base.en` (`base` for Polish or automatic detection) |
 | `WIZARD_CHESS_MICROPHONE` | system default |
 | `WIZARD_CHESS_VOICE_MAX_SECONDS` | `6.0` |
 | `WIZARD_CHESS_VOICE_START_TIMEOUT_SECONDS` | `3.0` |

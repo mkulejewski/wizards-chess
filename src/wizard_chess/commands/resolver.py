@@ -1,5 +1,7 @@
 """Resolution of state-independent intents against legal chess moves."""
 
+import logging
+
 import chess
 
 from wizard_chess.commands.intents import (
@@ -17,11 +19,14 @@ from wizard_chess.domain.exceptions import (
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
 
+LOGGER = logging.getLogger(__name__)
+
 
 class MoveResolver:
     """Resolve a move intent to exactly one legal application move."""
 
     def resolve(self, intent: MoveCommandIntent, game: ChessGame) -> ChessMove:
+        LOGGER.debug("Resolving move intent: %r", intent)
         if isinstance(intent, SanMoveIntent):
             return self._resolve_san(intent, game)
         if isinstance(intent, ContextualMoveIntent):
@@ -35,6 +40,11 @@ class MoveResolver:
             and move.target == attempted_move.target
             and (attempted_move.promotion is None or move.promotion == attempted_move.promotion)
         ]
+        LOGGER.debug(
+            "Coordinate move candidates for %s: %s",
+            attempted_move.uci(),
+            [move.uci() for move in candidates],
+        )
 
         if not candidates:
             game.validate_move(attempted_move)
@@ -44,10 +54,13 @@ class MoveResolver:
                 f"Move {attempted_move.source} to {attempted_move.target} "
                 "requires a promotion piece"
             )
-        return candidates[0]
+        resolved = candidates[0]
+        LOGGER.debug("Resolved coordinate move: %s", resolved.uci())
+        return resolved
 
     def _resolve_san(self, intent: SanMoveIntent, game: ChessGame) -> ChessMove:
         board = game.board
+        LOGGER.debug("Parsing SAN move: %s", intent.notation)
         try:
             python_move = board.parse_san(intent.notation)
         except chess.AmbiguousMoveError as error:
@@ -58,7 +71,9 @@ class MoveResolver:
         if board.san(python_move) != intent.notation:
             raise InvalidMoveError(f"Invalid SAN for current position: {intent.notation}")
 
-        return ChessMove.from_python_chess(python_move)
+        resolved = ChessMove.from_python_chess(python_move)
+        LOGGER.debug("Resolved SAN move: %s / SAN=%s", resolved.uci(), intent.notation)
+        return resolved
 
     def _resolve_contextual(self, intent: ContextualMoveIntent, game: ChessGame) -> ChessMove:
         board = game.board
@@ -98,6 +113,11 @@ class MoveResolver:
                     continue
             candidates.append(move)
 
+        LOGGER.debug(
+            "Contextual legal move candidates: %s",
+            [move.uci() for move in candidates],
+        )
+
         if not candidates:
             detail = intent.destination or intent.castle or "requested action"
             raise InvalidMoveError(f"No legal move matches {detail}")
@@ -105,7 +125,9 @@ class MoveResolver:
             piece = intent.piece.value if intent.piece is not None else "piece"
             origins = ", ".join(chess.square_name(move.from_square) for move in candidates)
             raise AmbiguousMoveError(f"Which {piece}? Legal origins: {origins}")
-        return ChessMove.from_python_chess(candidates[0])
+        resolved = ChessMove.from_python_chess(candidates[0])
+        LOGGER.debug("Resolved contextual move: %s", resolved.uci())
+        return resolved
 
 
 _PIECE_TYPES: dict[PieceName, chess.PieceType] = {

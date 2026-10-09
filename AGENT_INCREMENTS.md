@@ -40,6 +40,41 @@ Status meanings:
 | Post-game analysis presentation | Complete | **Analyse game** synchronously cancels and invalidates any active live-position worker before starting full-game analysis, including after resignation without a FEN change. Completed move-by-move text reports remain visible through terminal-position refreshes and history navigation while cached/live evaluations continue updating the sidebar and the completed-analysis graph remains available. |
 | Bundled Stockfish distribution | Complete for Linux x86-64 | Official, unmodified Stockfish 18 baseline binary stored as a checksummed XZ asset; atomic first-use extraction to the XDG cache; explicit executable override, platform bundle, and system `PATH` precedence; corrupt/unsupported-bundle fallback; GPLv3, authorship, exact source archive, build target, and hashes documented. Other OS/CPU targets use the existing custom path or `PATH` until a matching release bundle is added. |
 | Human draw offers and resignation controls | Complete | Replaced immediate command draws with a pending offer/accept/reject state machine; a legal move rejects an offer, while consecutive `draw` actions agree it. Added English and Polish command variants, human-player enforcement, immediate human claims when threefold/fifty-move rules apply, and an unchanged-position-only lockout after rejection that clears on the next position mutation. Snapshot capabilities/status drive state-aware PySide6 **Offer Draw**/**Accept Draw**/**Claim Draw**, **Reject Draw**, and **Resign** buttons. **New Game…** remains available during full-game analysis and safely cancels that worker before setup opens. Domain, application, parser, view-model, cancellation, and GUI paths are covered. |
+| Configurable runtime logging and diagnostic expansion | Complete | Case-insensitive `DEBUG`/`INFO`/`WARNING`/`ERROR`/`OFF` launcher levels; independent terminal and XDG-state rotating-file destinations; CLI/environment/persisted/default precedence; compact terminal and timestamped UTF-8 file formats; idempotent central handler configuration; startup, command, move, voice, engine, analysis, GUI-worker, hardware, persistence, and shutdown diagnostics; focused handler/filter/file/CLI/persistence tests and README documentation. |
+| Polish voice recognizer configuration fix | Complete; live microphone acceptance pending | The GUI and CLI now configure their owned recognizer from the authoritative session language. Polish and automatic recognition select the multilingual `base` model by default, English selects `base.en`, explicit model overrides remain supported, and GUI startup/language-switch regressions are covered. |
+| Agent instruction interoperability | Complete | Added a minimal root `CLAUDE.md` entry point that delegates to the canonical `AGENTS.md`, avoiding duplicated guidance that could drift between agents. |
+
+### Configurable runtime logging modification record
+
+- Added `src/wizard_chess/logging_config.py` with typed log levels, resolved destination
+  configuration, compact terminal formatting, 10 MiB UTF-8 rotating files with five backups,
+  clean `OFF` handling, and duplicate-safe handler replacement.
+- Extended `configuration.py` and `persistence/settings_store.py` with logging level,
+  terminal/file toggles, optional file path, environment overlays, schema-6 persistence, and
+  recoverable settings-load diagnostics.
+- Expanded `main.py` with `--log-level`, `--log-file`, `--no-log-file`, `--terminal-log`, and
+  `--no-terminal-log`; CLI values override environment/persisted defaults, and the default log is
+  under the existing XDG state directory.
+- Instrumented `application/session.py`, `application/scripted_game.py`, `commands/parser.py`,
+  `commands/resolver.py`, `engine/factory.py`, `engine/stockfish.py`, `analysis/service.py`,
+  `analysis/live.py`, `speech/controller.py`, `speech/factory.py`, `hardware/coordinator.py`, and
+  the GUI application/engine/analysis/live-analysis/voice workers at meaningful processing and
+  failure boundaries without changing gameplay behavior.
+- Added `tests/unit/test_logging_config.py` for defaults, CLI parsing/errors/precedence, handler
+  toggles, custom paths, parent creation, UTF-8 writes, filtering, `OFF`, repeated configuration,
+  XDG defaults, and settings persistence; updated `README.md` with usage, levels, destinations,
+  rotation, paths, and environment controls.
+
+### Polish voice recognizer configuration modification record
+
+- Extended `speech/config.py` so adapter settings can be resolved for the application's effective
+  voice language, selecting a multilingual default model for Polish and automatic detection while
+  retaining explicit `WIZARD_CHESS_VOICE_MODEL` overrides.
+- Updated the PySide6 window's startup and live language-switch composition, plus CLI composition,
+  so recognizer language/model settings cannot silently diverge from the session parser language.
+- Added unit coverage for language-compatible default models and custom model overrides, plus a GUI
+  regression covering saved Polish startup and English/Polish switching.
+- Clarified automatic-detection model selection in `README.md`.
 
 ## Stage 3 hardware foundation
 
@@ -93,6 +128,36 @@ Human draw-offer and resignation controls clean run on 2026-08-26:
 - `uv run ruff check .` — **passed**.
 - `uv run ruff format --check .` — **108 files already formatted**.
 - `uv run pyright` — **0 errors, 0 warnings**.
+
+Configurable runtime logging clean run on 2026-08-28:
+
+- `uv run pytest` — **405 passed**.
+- `uv run ruff check .` — **passed**.
+- `uv run ruff format --check .` — **110 files already formatted**.
+- `uv run pyright` — **0 errors, 0 warnings**.
+- Scripted launcher acceptance with isolated XDG directories confirmed simultaneous DEBUG file
+  diagnostics, a custom nested log path with terminal output disabled, the default XDG-state log
+  destination, clean checkmate/shutdown events, and `OFF` suppression without creating a file.
+
+Polish voice recognizer configuration fix clean run on 2026-09-04:
+
+- `uv run pytest` — **410 passed**.
+- `uv run ruff check .` — **passed**.
+- `uv run ruff format --check .` — **110 files already formatted**.
+- `uv run pyright` — **0 errors, 0 warnings**.
+- Real microphone/model acceptance remains pending; deterministic configuration and GUI switching
+  paths passed automatically.
+
+Commit preparation verification on 2026-10-09:
+
+- Included the logging task instructions, canonical-guidance `CLAUDE.md` entry point,
+  and `examples/am_kc.pgn` sample game alongside the recorded implementation changes.
+- `uv run --no-sync python -m pytest` — **410 passed**.
+- `uv run ruff check .` — **passed**.
+- `uv run ruff format --check .` — **111 files already formatted**.
+- `uv run --no-sync python -m pyright` — **0 errors, 0 warnings**.
+- Validation used the existing Python 3.13.5 environment and a writable temporary uv cache;
+  module invocation bypassed tool launchers referencing the checkout's previous location.
 
 Manual acceptance still required on a machine with the relevant optional systems:
 

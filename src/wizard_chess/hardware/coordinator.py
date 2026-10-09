@@ -43,6 +43,7 @@ class HardwareCoordinator:
         self._execution_lock = Lock()
         self._results: list[PhysicalExecutionResult] = []
         LOGGER.info("Physical board initialized from assumed placement")
+        LOGGER.debug("Initial physical board state: %r", self._board_state)
 
     @classmethod
     def from_piece_symbols(
@@ -122,6 +123,7 @@ class HardwareCoordinator:
             self._execution_lock.release()
 
     def _execute_move(self, event: MoveExecuted) -> PhysicalExecutionResult:
+        LOGGER.debug("Physical board state before %s: %r", event.uci, self._board_state)
         try:
             operations = self._planner.plan(event)
         except UnsupportedPhysicalMove as error:
@@ -136,6 +138,8 @@ class HardwareCoordinator:
                     message=str(error),
                 )
             )
+
+        LOGGER.debug("Motion plan for %s: %r", event.uci, operations)
 
         if self.controller_state is not HardwareControllerState.READY:
             self._board_state = self._board_state.with_synchronization(
@@ -206,6 +210,7 @@ class HardwareCoordinator:
         except HardwareError as error:
             return self._fail_execution(event, operations, str(error), hardware_result)
         LOGGER.info("Physical execution completed and board synchronized for %s", event.uci)
+        LOGGER.debug("Physical board state after %s: %r", event.uci, self._board_state)
         return self._record(
             PhysicalExecutionResult(
                 event,
@@ -236,6 +241,14 @@ class HardwareCoordinator:
             self._board_state = self._board_state.with_synchronization(
                 PhysicalSynchronization.DESYNCHRONIZED
             )
+        if self._board_state.synchronization is PhysicalSynchronization.SYNCHRONIZED:
+            LOGGER.info("Physical and logical board placement reconciled")
+        else:
+            LOGGER.warning(
+                "Physical/logical board reconciliation result: %s",
+                self._board_state.synchronization.value,
+            )
+        LOGGER.debug("Physical board state after reconciliation: %r", self._board_state)
         return self._board_state.synchronization
 
     def is_synchronized(self, pieces: PieceSymbols | None = None) -> bool:

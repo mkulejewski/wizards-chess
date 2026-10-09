@@ -1,5 +1,6 @@
 """State-free parser for coordinate, SAN, and application commands."""
 
+import logging
 import re
 
 from wizard_chess.commands.intents import (
@@ -11,6 +12,8 @@ from wizard_chess.commands.intents import (
 )
 from wizard_chess.commands.normalizer import normalize_command
 from wizard_chess.domain.exceptions import InvalidCommandError
+
+LOGGER = logging.getLogger(__name__)
 
 _SQUARE = re.compile(r"^[a-h][1-8]$")
 _SAN = re.compile(
@@ -45,6 +48,7 @@ class CommandParser:
 
     def parse(self, text: str) -> Intent:
         normalized = normalize_command(text)
+        LOGGER.debug("Parsing command input: raw=%r normalized=%r", text, normalized)
         if not normalized:
             raise InvalidCommandError("Enter a move or command")
 

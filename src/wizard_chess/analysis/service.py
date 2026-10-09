@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 import chess
@@ -19,6 +20,8 @@ from wizard_chess.domain.move import ChessMove
 from wizard_chess.domain.results import PlayerColor
 from wizard_chess.engine.base import ChessEngine
 from wizard_chess.engine.models import EngineEvaluation, PositionAnalysis
+
+LOGGER = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
 CancellationCheck = Callable[[], bool]
@@ -53,6 +56,11 @@ class AnalysisService:
         replay = source_board.root()
         results: list[MoveAnalysis] = []
         total = len(moves)
+        LOGGER.info(
+            "Post-game analysis started: plies=%d time_per_position_ms=%s",
+            total,
+            self._analysis_time_ms,
+        )
 
         for index, python_move in enumerate(moves, start=1):
             if cancellation():
@@ -70,30 +78,39 @@ class AnalysisService:
             after_evaluation = self._evaluation_for_position(replay, after)
             loss = _centipawn_loss(mover, before_evaluation, after_evaluation)
             best_match = preferred == played
-            results.append(
-                MoveAnalysis(
-                    ply=index,
-                    color=mover,
-                    san=san,
-                    played_move=played,
-                    preferred_move=preferred,
-                    evaluation_before=before_evaluation,
-                    evaluation_after=after_evaluation,
-                    principal_variation=principal_variation,
-                    centipawn_loss=loss,
-                    classification=self._policy.classify(loss, best_move_match=best_match),
-                )
+            move_result = MoveAnalysis(
+                ply=index,
+                color=mover,
+                san=san,
+                played_move=played,
+                preferred_move=preferred,
+                evaluation_before=before_evaluation,
+                evaluation_after=after_evaluation,
+                principal_variation=principal_variation,
+                centipawn_loss=loss,
+                classification=self._policy.classify(loss, best_move_match=best_match),
+            )
+            results.append(move_result)
+            LOGGER.debug(
+                "Analysed ply %d/%d: move=%s loss=%d classification=%s",
+                index,
+                total,
+                san,
+                loss,
+                move_result.classification.value,
             )
             if on_progress is not None:
                 on_progress(index, total)
 
         move_results = tuple(results)
-        return GameAnalysis(
+        analysis = GameAnalysis(
             source_pgn=game.to_pgn(),
             moves=move_results,
             white=_statistics(move_results, PlayerColor.WHITE),
             black=_statistics(move_results, PlayerColor.BLACK),
         )
+        LOGGER.info("Post-game analysis completed: plies=%d", total)
+        return analysis
 
     def _analyse(
         self,
@@ -103,6 +120,7 @@ class AnalysisService:
         fen = board.fen()
         cached = self._cache.get(fen)
         if cached is not None:
+            LOGGER.debug("Reusing cached engine analysis: FEN=%s", fen)
             return cached
         analysis = self._engine.analyse_position(
             board.copy(stack=False),

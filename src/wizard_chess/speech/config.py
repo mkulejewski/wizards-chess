@@ -23,8 +23,12 @@ class VoiceConfig:
     silence_threshold: float = 0.015
 
     @classmethod
-    def from_environment(cls) -> "VoiceConfig":
-        """Read optional overrides, retaining safe defaults for invalid values."""
+    def from_environment(
+        cls,
+        *,
+        language: VoiceLanguage | None = None,
+    ) -> "VoiceConfig":
+        """Read optional overrides for the effective application voice language."""
         defaults = cls()
         raw_device = os.environ.get("WIZARD_CHESS_MICROPHONE", "").strip()
         device: int | str | None
@@ -36,15 +40,16 @@ class VoiceConfig:
             except ValueError:
                 device = raw_device
 
-        raw_language = os.environ.get(
-            "WIZARD_CHESS_VOICE_LANGUAGE", defaults.language.value
-        ).strip()
-        try:
-            language = VoiceLanguage(raw_language)
-        except ValueError:
-            LOGGER.warning("Ignoring invalid WIZARD_CHESS_VOICE_LANGUAGE=%r", raw_language)
-            language = defaults.language
-        default_model = "base" if language is VoiceLanguage.POLISH else defaults.model
+        if language is None:
+            raw_language = os.environ.get(
+                "WIZARD_CHESS_VOICE_LANGUAGE", defaults.language.value
+            ).strip()
+            try:
+                language = VoiceLanguage(raw_language)
+            except ValueError:
+                LOGGER.warning("Ignoring invalid WIZARD_CHESS_VOICE_LANGUAGE=%r", raw_language)
+                language = defaults.language
+        default_model = defaults.model if language is VoiceLanguage.ENGLISH else "base"
 
         return cls(
             model=os.environ.get("WIZARD_CHESS_VOICE_MODEL", default_model).strip()

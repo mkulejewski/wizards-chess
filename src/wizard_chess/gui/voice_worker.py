@@ -1,10 +1,14 @@
 """Qt worker that keeps microphone capture and recognition off the GUI thread."""
 
+import logging
+
 from PySide6.QtCore import QThread, Signal
 
 from wizard_chess.application.session import SessionResult
 from wizard_chess.speech.controller import VoiceController
 from wizard_chess.speech.models import VoiceState
+
+LOGGER = logging.getLogger(__name__)
 
 
 class VoiceWorker(QThread):
@@ -19,11 +23,14 @@ class VoiceWorker(QThread):
         self._controller = controller
 
     def run(self) -> None:
+        LOGGER.debug("Voice worker started")
         try:
             result = self._controller.listen_once(self._emit_state)
         except Exception as error:
+            LOGGER.debug("Voice worker failed", exc_info=True)
             self.failed.emit(error)
             return
+        LOGGER.debug("Voice worker completed")
         self.succeeded.emit(result)
 
     def cancel(self) -> None:

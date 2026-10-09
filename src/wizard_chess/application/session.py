@@ -21,7 +21,7 @@ from wizard_chess.configuration import (
     VoiceLanguage,
 )
 from wizard_chess.domain.events import MoveAnnotation, MoveExecuted
-from wizard_chess.domain.exceptions import GameTerminationError
+from wizard_chess.domain.exceptions import GameTerminationError, WizardChessError
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.domain.move import ChessMove
 from wizard_chess.domain.results import GameResult, GameStatus, PlayerColor
@@ -117,6 +117,20 @@ class GameSession:
         self.live_analysis = LiveAnalysisController(self.settings.engine.live_analysis_max_depth)
         self._last_feedback: str | None = None
         self._revision = 0
+        LOGGER.info(
+            "Game created: White=%s (%s), Black=%s (%s)",
+            self.settings.players.white_name,
+            self.settings.players.white_kind.value,
+            self.settings.players.black_name,
+            self.settings.players.black_kind.value,
+        )
+        LOGGER.info(
+            "Engine subsystem: %s%s",
+            "enabled" if self._engine is not None else "disabled",
+            f" ({type(self._engine).__name__})" if self._engine is not None else "",
+        )
+        LOGGER.info("Physical board backend: %s", type(self._physical_board).__name__)
+        LOGGER.debug("Initial position: FEN=%s", self._game.fen())
 
     @property
     def game(self) -> ChessGame:
@@ -247,16 +261,24 @@ class GameSession:
 
     def play_text(self, text: str) -> SessionResult:
         """Interpret text and execute it through the authoritative application path."""
-        intent = self._parser.parse(text)
-        if isinstance(intent, MoveCommandIntent):
-            move = self._resolver.resolve(intent, self._game)
-            event = self.play_move(move)
-            result = SessionResult(
-                message=translate("session.played", self.voice_language, san=event.san),
-                move_event=event,
-            )
-        else:
-            result = self._execute_command(intent)
+        LOGGER.debug("Raw command received: %r", text)
+        try:
+            intent = self._parser.parse(text)
+            LOGGER.debug("Command parser result: %r", intent)
+            if isinstance(intent, MoveCommandIntent):
+                move = self._resolver.resolve(intent, self._game)
+                LOGGER.debug("Resolved move: UCI=%s", move.uci())
+                event = self.play_move(move)
+                result = SessionResult(
+                    message=translate("session.played", self.voice_language, san=event.san),
+                    move_event=event,
+                )
+            else:
+                LOGGER.info("Command accepted: %s", intent.command.value)
+                result = self._execute_command(intent)
+        except WizardChessError as error:
+            LOGGER.warning("Command rejected: %s; input=%r", error, text)
+            raise
         is_repeat = isinstance(intent, CommandIntent) and intent.command is CommandName.REPEAT
         if result.message is not None and not is_repeat:
             self._last_feedback = result.message
@@ -313,7 +335,16 @@ class GameSession:
             )
         self._revision += 1
         self._autosave()
-        LOGGER.info("Move executed: %s", event.uci)
+        ply = len(self._game.board.move_stack)
+        LOGGER.info(
+            "Move %d %s accepted: %s (%s)",
+            (ply + 1) // 2,
+            mover.value.title(),
+            event.san,
+            event.uci,
+        )
+        LOGGER.debug("Board FEN after move: %s", self._game.fen())
+        self._log_game_status()
         return event
 
     def undo(self) -> ChessMove:
@@ -323,6 +354,8 @@ class GameSession:
         self._clock.set_active(self._game.turn)
         self._revision += 1
         self._autosave()
+        LOGGER.info("Move undone: %s", move.uci())
+        LOGGER.debug("Board FEN after undo: %s", self._game.fen())
         return move
 
     def redo(self) -> MoveExecuted:
@@ -332,6 +365,9 @@ class GameSession:
         self._clock.set_active(self._game.turn)
         self._revision += 1
         self._autosave()
+        LOGGER.info("Move redone: %s (%s)", event.san, event.uci)
+        LOGGER.debug("Board FEN after redo: %s", self._game.fen())
+        self._log_game_status()
         return event
 
     def new_game(self, settings: ApplicationSettings | None = None) -> None:
@@ -346,7 +382,8 @@ class GameSession:
         self._revision += 1
         self._last_feedback = None
         self._autosave()
-        LOGGER.info("New game")
+        LOGGER.info("New game: White=%s, Black=%s", *self._player_descriptions())
+        LOGGER.debug("Initial position: FEN=%s", self._game.fen())
 
     def _configure_new_game(self, settings: ApplicationSettings) -> None:
         configured = settings.with_required_engine()
@@ -369,7 +406,8 @@ class GameSession:
         if previous_engine is not None:
             previous_engine.close()
         self._autosave()
-        LOGGER.info("New configured game")
+        LOGGER.info("New configured game: White=%s, Black=%s", *self._player_descriptions())
+        LOGGER.debug("Initial position: FEN=%s", self._game.fen())
 
     def load_fen(self, fen: str) -> None:
         """Load a validated position and clear its unavailable history."""
@@ -379,6 +417,8 @@ class GameSession:
         self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
         self._autosave()
+        LOGGER.info("FEN position loaded")
+        LOGGER.debug("Loaded position: FEN=%s", self._game.fen())
 
     def load_pgn(self, pgn: str) -> None:
         """Load one validated main-line game without bypassing domain rules."""
@@ -390,6 +430,8 @@ class GameSession:
         self.live_analysis.reset(self.settings.engine.live_analysis_max_depth)
         self._revision += 1
         self._autosave()
+        LOGGER.info("PGN game loaded: plies=%d", len(self._game.board.move_stack))
+        LOGGER.debug("Loaded PGN position: FEN=%s", self._game.fen())
 
     def save_game(self, destination: str | Path | None = None) -> Path:
         """Save PGN to an explicit path or a unique local game-store path."""
@@ -409,6 +451,11 @@ class GameSession:
             return None
         source_fen = self._game.fen()
         source_revision = self._revision
+        LOGGER.debug(
+            "Position submitted for engine move: revision=%d FEN=%s",
+            source_revision,
+            source_fen,
+        )
         decision = self._engine.play_move(
             self._game.board,
             clock=self.engine_clock_state(),
@@ -438,6 +485,11 @@ class GameSession:
             return False
         if self.settings.engine.player_mode is StockfishPlayerMode.GAME_CLOCK:
             self._clock.start(self._game.turn)
+        LOGGER.debug(
+            "Engine turn prepared: side=%s mode=%s",
+            self._game.turn.value,
+            self.settings.engine.player_mode.value,
+        )
         return True
 
     def engine_clock_state(self) -> EngineClockState | None:
@@ -470,8 +522,21 @@ class GameSession:
             or self._game.is_game_over()
             or not self.engine_controls_turn()
         ):
-            LOGGER.info("Ignored stale or terminal engine decision")
+            LOGGER.debug(
+                "Ignored stale or terminal engine decision: expected_revision=%d "
+                "current_revision=%d expected_fen=%s current_fen=%s",
+                expected_revision,
+                self._revision,
+                expected_fen,
+                self._game.fen(),
+            )
             return None
+        LOGGER.info(
+            "Engine move selected: %s depth=%s evaluation=%s",
+            decision.move.uci(),
+            decision.depth,
+            decision.evaluation.display() if decision.evaluation is not None else "unavailable",
+        )
         return self.play_move(decision.move, engine_decision=decision)
 
     def engine_controls_turn(self) -> bool:
@@ -488,6 +553,7 @@ class GameSession:
         self._revision += 1
         self._autosave()
         winner = result.winner.value.title() if result.winner is not None else "Unknown"
+        LOGGER.info("Game completed by resignation: winner=%s result=%s", winner, result.notation)
         return SessionResult(
             message=translate("session.resigned", self.voice_language, winner=winner)
         )
@@ -513,6 +579,7 @@ class GameSession:
             )
         proposer = self._game.propose_draw()
         self._revision += 1
+        LOGGER.info("Draw offered by %s", proposer.value)
         return SessionResult(
             message=translate(
                 "session.draw_offered",
@@ -530,6 +597,7 @@ class GameSession:
         self._clock.pause()
         self._revision += 1
         self._autosave()
+        LOGGER.info("Game completed by draw agreement")
         return SessionResult(message=translate("session.draw", self.voice_language))
 
     def reject_draw(self) -> SessionResult:
@@ -539,6 +607,7 @@ class GameSession:
             raise GameTerminationError(translate("session.no_draw_offer", self.voice_language))
         self._game.reject_draw()
         self._revision += 1
+        LOGGER.info("Draw offer rejected")
         return SessionResult(message=translate("session.draw_rejected", self.voice_language))
 
     def start_clock(self) -> None:
@@ -567,9 +636,16 @@ class GameSession:
                 self._physical_board.close()
             except Exception:
                 LOGGER.exception("Physical-board shutdown failed")
+        LOGGER.info("Game session resources closed")
 
     def _emit_physical_move(self, event: MoveExecuted) -> None:
         """Keep optional output-adapter failures outside the chess transaction."""
+        LOGGER.debug(
+            "Physical move requested: %s -> %s (%s)",
+            event.source_square,
+            event.target_square,
+            event.uci,
+        )
         try:
             self._physical_board.execute_move(event)
         except Exception:
@@ -649,9 +725,11 @@ class GameSession:
         if not self.settings.autosave or self._game_store is None:
             return
         try:
-            self._game_store.autosave(self._game.to_pgn())
+            path = self._game_store.autosave(self._game.to_pgn())
         except OSError:
             LOGGER.warning("Game autosave failed", exc_info=True)
+        else:
+            LOGGER.debug("Game autosaved: %s", path)
 
     def _adjudicate_timeout(self) -> None:
         snapshot = self._clock.snapshot()
@@ -697,12 +775,32 @@ class GameSession:
         self._clock.pause()
         self._revision += 1
         self._autosave()
+        LOGGER.info("Game completed by draw claim: %s", result.status.value)
         key = (
             "session.draw_claimed_fifty"
             if result.status is GameStatus.FIFTY_MOVE_RULE_CLAIM
             else "session.draw_claimed_threefold"
         )
         return SessionResult(message=translate(key, self.voice_language))
+
+    def _log_game_status(self) -> None:
+        result = self._game.result()
+        if result.status is GameStatus.CHECK:
+            LOGGER.info("%s is in check", self._game.turn.value.title())
+        elif result.is_over:
+            LOGGER.info(
+                "Game completed: status=%s result=%s winner=%s",
+                result.status.value,
+                result.notation,
+                result.winner.value if result.winner is not None else "none",
+            )
+
+    def _player_descriptions(self) -> tuple[str, str]:
+        players = self.settings.players
+        return (
+            f"{players.white_name} ({players.white_kind.value})",
+            f"{players.black_name} ({players.black_kind.value})",
+        )
 
     @staticmethod
     def _game_metadata(settings: ApplicationSettings) -> dict[str, str]:

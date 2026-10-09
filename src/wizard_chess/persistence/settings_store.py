@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict
 from pathlib import Path
 from typing import cast
@@ -22,12 +23,15 @@ from wizard_chess.configuration import (
     StockfishPlayerMode,
     VoiceLanguage,
 )
+from wizard_chess.logging_config import LogLevel
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SettingsStore:
     """Read current settings and tolerate missing fields from older schemas."""
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -38,11 +42,13 @@ class SettingsStore:
         temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
         temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         temporary.replace(self.path)
+        LOGGER.debug("Application settings saved: %s", self.path)
         return self.path
 
     def load(self, defaults: ApplicationSettings | None = None) -> ApplicationSettings:
         fallback = defaults or ApplicationSettings()
         if not self.path.exists():
+            LOGGER.debug("Application settings file not found; using defaults: %s", self.path)
             return fallback
         try:
             payload = cast(dict[str, object], json.loads(self.path.read_text(encoding="utf-8")))
@@ -159,9 +165,24 @@ class SettingsStore:
                     fallback.show_game_setup_on_startup,
                 ),
                 autosave=_bool_value(raw.get("autosave"), fallback.autosave),
-                logging_level=str(raw.get("logging_level", fallback.logging_level)),
+                logging_level=LogLevel.parse(str(raw.get("logging_level", fallback.logging_level))),
+                terminal_log_enabled=_bool_value(
+                    raw.get("terminal_log_enabled"),
+                    fallback.terminal_log_enabled,
+                ),
+                file_log_enabled=_bool_value(
+                    raw.get("file_log_enabled"),
+                    fallback.file_log_enabled,
+                ),
+                log_file_path=_optional_string(raw.get("log_file_path", fallback.log_file_path)),
             )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as error:
+            LOGGER.warning(
+                "Application settings could not be loaded from %s; using defaults: %s",
+                self.path,
+                error,
+                exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+            )
             return fallback
 
 

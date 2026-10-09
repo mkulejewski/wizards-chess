@@ -1,5 +1,6 @@
 """Qt worker for cancellable post-game analysis."""
 
+import logging
 from threading import Event
 
 from PySide6.QtCore import QThread, Signal
@@ -8,6 +9,8 @@ from wizard_chess.analysis.models import GameAnalysis
 from wizard_chess.analysis.service import AnalysisService
 from wizard_chess.domain.game import ChessGame
 from wizard_chess.engine.base import ChessEngine
+
+LOGGER = logging.getLogger(__name__)
 
 
 class GameAnalysisWorker(QThread):
@@ -26,6 +29,7 @@ class GameAnalysisWorker(QThread):
 
     def run(self) -> None:
         game = ChessGame()
+        LOGGER.debug("Post-game analysis worker started")
         try:
             game.load_pgn(self._pgn)
             result = AnalysisService(
@@ -38,13 +42,16 @@ class GameAnalysisWorker(QThread):
             )
         except Exception as error:
             if not self._cancelled.is_set():
+                LOGGER.exception("Post-game analysis worker failed")
                 self.failed.emit(error)
             return
         if not self._cancelled.is_set():
+            LOGGER.debug("Post-game analysis worker completed")
             self.succeeded.emit(result)
 
     def cancel(self, *, stop_engine: bool = False) -> None:
         self._cancelled.set()
+        LOGGER.debug("Post-game analysis worker cancellation requested")
         if stop_engine:
             self._engine.cancel_pending()
 

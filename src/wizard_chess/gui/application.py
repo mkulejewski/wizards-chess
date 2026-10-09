@@ -1,5 +1,6 @@
 """Qt application bootstrap."""
 
+import logging
 import sys
 from collections.abc import Sequence
 
@@ -10,6 +11,8 @@ from wizard_chess.application.session import GameSession
 from wizard_chess.configuration import ApplicationSettings, should_show_game_setup
 from wizard_chess.gui.main_window import MainWindow
 from wizard_chess.persistence.settings_store import SettingsStore
+
+LOGGER = logging.getLogger(__name__)
 
 
 def run_gui(
@@ -25,6 +28,7 @@ def run_gui(
     application = existing if isinstance(existing, QApplication) else QApplication(qt_arguments)
     active_session = session or GameSession()
     setup_pending = should_show_game_setup(active_session.settings, force=force_setup)
+    LOGGER.info("Desktop interface initialized: setup_pending=%s", setup_pending)
     window = MainWindow(
         active_session,
         settings_store=settings_store,
@@ -34,4 +38,6 @@ def run_gui(
     window.show()
     if setup_pending:
         QTimer.singleShot(0, window.show_startup_setup)
-    return application.exec()
+    exit_code = application.exec()
+    LOGGER.info("Desktop event loop stopped: exit_code=%d", exit_code)
+    return exit_code

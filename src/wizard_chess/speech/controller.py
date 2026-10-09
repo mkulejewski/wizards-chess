@@ -64,6 +64,7 @@ class VoiceController[CommandResultT]:
     def cancel(self) -> None:
         """Request that an active command stop before application submission."""
         self._cancel_requested.set()
+        LOGGER.info("Voice input cancellation requested")
 
     def listen_once(
         self, on_state: StateCallback | None = None
@@ -93,7 +94,12 @@ class VoiceController[CommandResultT]:
                 normalized_text=normalized_text,
                 confidence=transcript.confidence,
             )
-            LOGGER.debug("Voice transcript: raw=%r normalized=%r", raw_text, normalized_text)
+            LOGGER.debug(
+                "Voice transcription: raw=%r normalized=%r confidence=%s",
+                raw_text,
+                normalized_text,
+                transcript.confidence,
+            )
             self._raise_if_cancelled()
             try:
                 command_result = self._submit_command(normalized_text)
@@ -102,10 +108,15 @@ class VoiceController[CommandResultT]:
 
             result = VoiceCommandResult(recognition, command_result)
             self._report_state(VoiceState.SUCCESS, on_state)
+            LOGGER.info("Voice command accepted: %r", normalized_text)
             return result
-        except VoiceError:
+        except VoiceError as error:
             self._report_state(VoiceState.ERROR, on_state)
-            LOGGER.debug("Voice command failed", exc_info=True)
+            LOGGER.warning(
+                "Voice command failed: %s",
+                error,
+                exc_info=LOGGER.isEnabledFor(logging.DEBUG),
+            )
             raise
         finally:
             self._active_lock.release()
@@ -137,5 +148,6 @@ class VoiceController[CommandResultT]:
     def _report_state(self, state: VoiceState, callback: StateCallback | None) -> None:
         with self._state_lock:
             self._state = state
+        LOGGER.debug("Voice state changed: %s", state.value)
         if callback is not None:
             callback(state)
