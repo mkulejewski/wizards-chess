@@ -183,6 +183,12 @@ Manual acceptance still required on a machine with the relevant optional systems
   0 warnings** using the existing environment and module-based pytest/pyright launchers.
 - Confirmed the retained local archive matches its manifest checksum and is ignored by Git.
 
+### Repository license — 2026-11-22
+
+- Added the GNU General Public License version 3 text in the root `LICENSE` file.
+- Documented the Wizard Chess copyright, the `GPL-3.0-or-later` grant for its source code,
+  and the link to third-party notices in `README.md`.
+
 ## Deferred stages
 
 | Stage | Status | Boundary |

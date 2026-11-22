@@ -9,6 +9,15 @@ Every input path converges on one `GameSession` and one `ChessGame`. `python-che
 the sole source of legality, position state, SAN/UCI, check, mate, and draw rules. Optional
 engine and speech failures never prevent ordinary typed or graphical human-vs-human play.
 
+## License
+
+Copyright © 2026 Mateusz Kulejewski.
+
+Wizard Chess source code is licensed under the [GNU General Public License, version 3](LICENSE),
+or (at your option) any later version (`GPL-3.0-or-later`). See the
+[third-party notices](THIRD_PARTY_NOTICES.md) for the licenses of the Tatiana chess pieces
+and Stockfish.
+
 ## Architecture
 
 ```text
